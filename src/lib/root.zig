@@ -4,6 +4,9 @@ pub const analysis = struct {
     pub const query = @import("analysis/query.zig");
     pub const queries = struct {
         pub const parse = @import("analysis/queries/parse.zig");
+        pub const item_tree = @import("analysis/queries/item_tree.zig");
+        pub const resolve = @import("analysis/queries/resolve.zig");
+        pub const imports = @import("analysis/queries/imports.zig");
     };
 };
 
@@ -19,6 +22,9 @@ pub const documents = @import("documents.zig");
 test {
     _ = analysis.query;
     _ = analysis.queries.parse;
+    _ = analysis.queries.item_tree;
+    _ = analysis.queries.resolve;
+    _ = analysis.queries.imports;
     _ = protocol.framing;
     _ = protocol.jsonrpc;
     _ = protocol.harness;
