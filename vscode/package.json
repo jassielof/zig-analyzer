@@ -8,12 +8,15 @@
   "bugs": {
     "url": "https://github.com/jassielof/zig-analyzer/issues"
   },
-  "readme": "README.adoc",
+  "readme": "README.md",
   "version": "0.1.0",
   "description": "Zig Analyzer provides language server support for the Zig programming language.",
-  "main": "index.js",
+  "main": "./dist/extension.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "typecheck": "tsc --noEmit",
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production && vsce package --no-dependencies"
   },
   "repository": {
     "type": "git",
@@ -21,7 +24,7 @@
     "directory": "vscode"
   },
   "engines": {
-    "vscode": "^1.105.0"
+    "vscode": "^1.125.0"
   },
   "homepage": "https://github.com/jassielof/zig-analyzer",
   "galleryBanner": {
@@ -68,6 +71,43 @@
         "scopeName": "source.zig",
         "path": "./syntaxes/zig.tmLanguage.json"
       }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Zig Analyzer",
+      "properties": {
+        "zigAnalyzer.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the zig-analyzer executable. If empty, the extension won't start the language server."
+        },
+        "zigAnalyzer.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the zig-analyzer language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "zigAnalyzer.restart",
+        "title": "Zig Analyzer: Restart Language Server"
+      }
     ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/vscode": "^1.125.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
   }
 }

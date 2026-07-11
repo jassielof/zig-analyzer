@@ -35,6 +35,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # TODO(phase 8): `pnpm run typecheck` (tsc --noEmit) and
-      # `pnpm run package` (esbuild bundle + vsce package --no-dependencies)
-      # once src/extension.ts, tsconfig.json, and esbuild.js exist.
+      - run: pnpm run typecheck
+
+      - run: pnpm run package

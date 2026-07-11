@@ -76,6 +76,14 @@ pub const Server = struct {
             self.handleDidClose(writer, msg) catch |err| std.log.err("textDocument/didClose: {t}", .{err});
         } else if (std.mem.eql(u8, msg.method, "textDocument/definition")) {
             try self.handleDefinition(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/hover")) {
+            try self.handleHover(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/documentSymbol")) {
+            try self.handleDocumentSymbol(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "workspace/symbol")) {
+            try self.handleWorkspaceSymbol(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/completion")) {
+            try self.handleCompletion(writer, msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -95,6 +103,10 @@ pub const Server = struct {
                 // 1 == TextDocumentSyncKind.Full.
                 textDocumentSync: u8 = 1,
                 definitionProvider: bool = true,
+                hoverProvider: bool = true,
+                documentSymbolProvider: bool = true,
+                workspaceSymbolProvider: bool = true,
+                completionProvider: struct {} = .{},
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
@@ -240,57 +252,88 @@ pub const Server = struct {
         });
     }
 
+    const DefinitionParams = struct {
+        textDocument: struct { uri: []const u8 },
+        position: Position,
+    };
+
     fn handleDefinition(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
-        const Params = struct {
-            textDocument: struct { uri: []const u8 },
-            position: Position,
-        };
-        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+        var parsed = std.json.parseFromValue(DefinitionParams, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
             try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/definition params");
             return;
         };
         defer parsed.deinit();
 
-        const uri = parsed.value.textDocument.uri;
-        const doc = self.documents.get(uri) orelse {
+        const any = try self.resolveRequestPosition(parsed.value.textDocument.uri, parsed.value.position) orelse {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
         };
+        defer self.gpa.free(any.uri);
 
-        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
-        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
-        const pos: resolve.Position = .{ .line = parsed.value.position.line, .character = parsed.value.position.character };
-
-        var result_uri: []const u8 = uri;
-        var owned_cross_uri: ?[]const u8 = null;
-        defer if (owned_cross_uri) |u| self.gpa.free(u);
-        var def: ?resolve.Definition = resolve.resolveAt(parsed_file.ast, tree.*, pos);
-
-        if (def == null) {
-            if (resolve.fieldAccessAt(parsed_file.ast, pos)) |fa| {
-                if (try self.resolveCrossFile(uri, parsed_file.ast, fa)) |cross| {
-                    result_uri = cross.uri;
-                    owned_cross_uri = cross.uri;
-                    def = cross.def;
-                }
-            }
-        }
-
-        if (def) |d| {
-            const LocationResult = struct { uri: []const u8, range: Range };
-            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
-                .uri = result_uri,
-                .range = .{
-                    .start = .{ .line = d.line, .character = d.character },
-                    .end = .{ .line = d.line, .character = d.end_character },
-                },
-            });
-        } else {
-            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
-        }
+        const LocationResult = struct { uri: []const u8, range: Range };
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
+            .uri = any.uri,
+            .range = .{
+                .start = .{ .line = any.def.line, .character = any.def.character },
+                .end = .{ .line = any.def.line, .character = any.def.end_character },
+            },
+        });
     }
 
-    const CrossFileDefinition = struct { uri: []const u8, def: resolve.Definition };
+    fn handleHover(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        var parsed = std.json.parseFromValue(DefinitionParams, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/hover params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const any = try self.resolveRequestPosition(parsed.value.textDocument.uri, parsed.value.position) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+        defer self.gpa.free(any.uri);
+
+        const HoverContents = struct { kind: []const u8 = "plaintext", value: []const u8 };
+        const HoverResult = struct {
+            contents: HoverContents,
+            range: Range,
+        };
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, HoverResult{
+            .contents = .{ .value = any.def.signature },
+            .range = .{
+                .start = .{ .line = any.def.line, .character = any.def.character },
+                .end = .{ .line = any.def.line, .character = any.def.end_character },
+            },
+        });
+    }
+
+    const AnyDefinition = struct { uri: []const u8, def: resolve.Definition };
+
+    /// Shared by `textDocument/definition` and `textDocument/hover`: both
+    /// need to resolve a position to a declaration, one to show its
+    /// location, the other its signature. Tries local resolution first
+    /// (params, immediate-body locals, this file's item tree), then
+    /// cross-file via `@import` bindings. The returned `uri` is always an
+    /// owned copy — same-file or cross-file — so callers have exactly one
+    /// ownership rule to follow.
+    fn resolveRequestPosition(self: *Server, uri: []const u8, position: Position) !?AnyDefinition {
+        const doc = self.documents.get(uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+        const pos: resolve.Position = .{ .line = position.line, .character = position.character };
+
+        if (resolve.resolveAt(parsed_file.ast, tree.*, pos)) |def| {
+            return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
+        }
+        if (resolve.fieldAccessAt(parsed_file.ast, pos)) |fa| {
+            if (try self.resolveCrossFile(uri, parsed_file.ast, fa)) |cross| {
+                return cross; // already owns its uri
+            }
+        }
+        return null;
+    }
+
+    const CrossFileDefinition = AnyDefinition;
 
     /// Follows `field_access.base` through `importer_ast`'s `@import`
     /// bindings into the imported file's item tree — reading only that
@@ -323,6 +366,141 @@ pub const Server = struct {
             return .{ .uri = try self.gpa.dupe(u8, target_uri), .def = def };
         }
         return null;
+    }
+
+    // LSP `SymbolKind`: 12 = Function, 13 = Variable.
+    fn symbolKind(kind: item_tree.Item.Kind) u8 {
+        return switch (kind) {
+            .function => 12,
+            .variable => 13,
+        };
+    }
+
+    fn handleDocumentSymbol(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct { textDocument: struct { uri: []const u8 } };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/documentSymbol params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const DocumentSymbolResult = struct { name: []const u8, kind: u8, range: Range, selectionRange: Range };
+        var symbols: std.ArrayList(DocumentSymbolResult) = .empty;
+        defer symbols.deinit(self.gpa);
+
+        const uri = parsed.value.textDocument.uri;
+        if (self.documents.get(uri)) |doc| {
+            const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+            const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+
+            for (tree.items) |item| {
+                // First occurrence only: a duplicate-named item (already
+                // flagged separately by semantic_diagnostics) would
+                // otherwise show the same location twice.
+                const def = resolve.definitionForRootItem(parsed_file.ast, item.name) orelse continue;
+                const range: Range = .{
+                    .start = .{ .line = def.line, .character = def.character },
+                    .end = .{ .line = def.line, .character = def.end_character },
+                };
+                try symbols.append(self.gpa, .{
+                    .name = item.name,
+                    .kind = symbolKind(item.kind),
+                    .range = range,
+                    .selectionRange = range,
+                });
+            }
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, symbols.items);
+    }
+
+    fn handleWorkspaceSymbol(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct { query: []const u8 = "" };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid workspace/symbol params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const SymbolInformationResult = struct {
+            name: []const u8,
+            kind: u8,
+            location: struct { uri: []const u8, range: Range },
+        };
+        var symbols: std.ArrayList(SymbolInformationResult) = .empty;
+        defer symbols.deinit(self.gpa);
+
+        var it = self.documents.documents.iterator();
+        while (it.next()) |entry| {
+            const doc_uri = entry.key_ptr.*;
+            const doc = entry.value_ptr.*;
+            const parsed_file = try parse.parse(&self.parse_cache, self.gpa, doc_uri, doc.text, doc.revision);
+            const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, doc_uri, parsed_file.ast, doc.revision);
+
+            for (tree.items) |item| {
+                if (parsed.value.query.len > 0 and std.mem.indexOf(u8, item.name, parsed.value.query) == null) continue;
+                const def = resolve.definitionForRootItem(parsed_file.ast, item.name) orelse continue;
+                try symbols.append(self.gpa, .{
+                    .name = item.name,
+                    .kind = symbolKind(item.kind),
+                    .location = .{
+                        .uri = doc_uri,
+                        .range = .{
+                            .start = .{ .line = def.line, .character = def.character },
+                            .end = .{ .line = def.line, .character = def.end_character },
+                        },
+                    },
+                });
+            }
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, symbols.items);
+    }
+
+    const keywords = [_][]const u8{
+        "const",       "var",     "fn",     "pub",      "return",   "if",        "else",
+        "while",       "for",     "switch", "struct",   "enum",     "union",     "error",
+        "try",         "catch",   "defer",  "errdefer", "break",    "continue",  "comptime",
+        "inline",      "export",  "extern", "test",     "null",     "undefined", "true",
+        "false",       "and",     "or",     "orelse",   "async",    "await",     "suspend",
+        "nosuspend",   "resume",  "packed", "align",    "volatile", "allowzero", "threadlocal",
+        "linksection", "noalias", "opaque", "anytype",  "anyframe",
+    };
+
+    fn handleCompletion(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        // LSP `CompletionItemKind`: 3 = Function, 6 = Variable, 14 = Keyword.
+        const CompletionItemResult = struct { label: []const u8, kind: u8 };
+        var parsed = std.json.parseFromValue(DefinitionParams, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/completion params");
+            return;
+        };
+        defer parsed.deinit();
+
+        var items: std.ArrayList(CompletionItemResult) = .empty;
+        defer items.deinit(self.gpa);
+
+        for (keywords) |kw| try items.append(self.gpa, .{ .label = kw, .kind = 14 });
+
+        const uri = parsed.value.textDocument.uri;
+        if (self.documents.get(uri)) |doc| {
+            const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+            const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+
+            for (tree.items) |item| {
+                try items.append(self.gpa, .{ .label = item.name, .kind = if (item.kind == .function) @as(u8, 3) else @as(u8, 6) });
+            }
+
+            const offset = resolve.positionToOffset(parsed_file.ast.source, .{
+                .line = parsed.value.position.line,
+                .character = parsed.value.position.character,
+            });
+            var local_names: std.ArrayList([]const u8) = .empty;
+            defer local_names.deinit(self.gpa);
+            try resolve.collectLocalScopeNames(self.gpa, parsed_file.ast, offset, &local_names);
+            for (local_names.items) |name| try items.append(self.gpa, .{ .label = name, .kind = 6 });
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, items.items);
     }
 };
 
@@ -399,7 +577,7 @@ test "unknown method after initialize gets MethodNotFound" {
     var responses = try harness.run(gpa, &server, &.{
         \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
         ,
-        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{}}
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/foldingRange","params":{}}
     });
     defer responses.deinit();
 
@@ -716,4 +894,108 @@ test "semantic diagnostics are skipped when the file has a syntax error" {
     // riding along on a broken parse.
     try std.testing.expectEqual(@as(usize, 1), items.len);
     try std.testing.expect(std.mem.indexOf(u8, items[0].object.get("message").?.string, "unused") == null);
+}
+
+test "textDocument/hover returns a function's signature" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\nfn main() void {\n    helper();\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":2,"character":5}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("fn helper() void", result.get("contents").?.object.get("value").?.string);
+}
+
+test "textDocument/documentSymbol lists top-level declarations" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn f() void {}\nconst x = 1;\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/documentSymbol","params":{"textDocument":{"uri":"file:///a.zig"}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("f", items[0].object.get("name").?.string);
+    try std.testing.expectEqual(@as(i64, 12), items[0].object.get("kind").?.integer); // Function
+    try std.testing.expectEqualStrings("x", items[1].object.get("name").?.string);
+    try std.testing.expectEqual(@as(i64, 13), items[1].object.get("kind").?.integer); // Variable
+}
+
+test "workspace/symbol searches across all open files" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn findMe() void {}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///b.zig","text":"const other = 1;\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"workspace/symbol","params":{"query":"find"}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("findMe", items[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("file:///a.zig", items[0].object.get("location").?.object.get("uri").?.string);
+}
+
+test "textDocument/completion offers keywords, top-level items, and in-scope locals" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\nfn main() void {\n    const local = 1;\n    \n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":3,"character":4}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.array.items;
+
+    var saw_keyword = false;
+    var saw_top_level = false;
+    var saw_local = false;
+    for (items) |item| {
+        const label = item.object.get("label").?.string;
+        if (std.mem.eql(u8, label, "const")) saw_keyword = true;
+        if (std.mem.eql(u8, label, "helper")) saw_top_level = true;
+        if (std.mem.eql(u8, label, "local")) saw_local = true;
+    }
+    try std.testing.expect(saw_keyword);
+    try std.testing.expect(saw_top_level);
+    try std.testing.expect(saw_local);
 }
