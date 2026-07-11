@@ -166,6 +166,12 @@ pub const Server = struct {
             self.handleDidChangeConfiguration(msg);
         } else if (std.mem.eql(u8, msg.method, "textDocument/semanticTokens/full")) {
             try self.handleSemanticTokensFull(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/references")) {
+            try self.handleReferences(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/rename")) {
+            try self.handleRename(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/signatureHelp")) {
+            try self.handleSignatureHelp(writer, msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -209,6 +215,11 @@ pub const Server = struct {
                         tokenModifiers: []const []const u8 = &.{ "declaration", "readonly" },
                     } = .{},
                     full: bool = true,
+                } = .{},
+                referencesProvider: bool = true,
+                renameProvider: bool = true,
+                signatureHelpProvider: struct {
+                    triggerCharacters: []const []const u8 = &.{ "(", "," },
                 } = .{},
             } = .{},
             serverInfo: struct {
@@ -697,6 +708,215 @@ pub const Server = struct {
 
         const SemanticTokensResult = struct { data: []const u32 };
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, SemanticTokensResult{ .data = data });
+    }
+
+    /// The identifier text at a `Definition`'s own location — re-sliced
+    /// from source via its line/character span, since `Definition`
+    /// carries a signature (which for functions is more than just the
+    /// name) but not the bare name itself.
+    fn nameOfDefinition(ast: Ast, def: resolve.Definition) []const u8 {
+        const start = resolve.positionToOffset(ast.source, .{ .line = def.line, .character = def.character });
+        const end = resolve.positionToOffset(ast.source, .{ .line = def.line, .character = def.end_character });
+        return ast.source[start..end];
+    }
+
+    fn handleReferences(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct {
+            textDocument: struct { uri: []const u8 },
+            position: Position,
+            context: struct { includeDeclaration: bool = false } = .{},
+        };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/references params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+        const pos: resolve.Position = .{ .line = parsed.value.position.line, .character = parsed.value.position.character };
+
+        const def = resolve.resolveAt(parsed_file.ast, tree.*, pos) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+        const target_name = nameOfDefinition(parsed_file.ast, def);
+
+        const refs = try resolve.findReferences(self.gpa, parsed_file.ast, tree.*, target_name, def.line, def.character);
+        defer self.gpa.free(refs);
+
+        const LocationResult = struct { uri: []const u8, range: Range };
+        var results: std.ArrayList(LocationResult) = .empty;
+        defer results.deinit(self.gpa);
+
+        if (parsed.value.context.includeDeclaration) {
+            try results.append(self.gpa, .{
+                .uri = uri,
+                .range = .{
+                    .start = .{ .line = def.line, .character = def.character },
+                    .end = .{ .line = def.line, .character = def.end_character },
+                },
+            });
+        }
+        for (refs) |r| {
+            try results.append(self.gpa, .{
+                .uri = uri,
+                .range = .{
+                    .start = .{ .line = r.line, .character = r.character },
+                    .end = .{ .line = r.line, .character = r.end_character },
+                },
+            });
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, results.items);
+    }
+
+    fn isValidZigIdentifier(name: []const u8) bool {
+        if (name.len == 0) return false;
+        if (!(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
+        for (name[1..]) |c| {
+            if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
+        }
+        // Rejecting keywords too, so a rename can't silently produce
+        // invalid code (e.g. renaming a variable to "const").
+        return std.zig.Token.getKeyword(name) == null;
+    }
+
+    fn handleRename(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct {
+            textDocument: struct { uri: []const u8 },
+            position: Position,
+            newName: []const u8,
+        };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/rename params");
+            return;
+        };
+        defer parsed.deinit();
+
+        if (!isValidZigIdentifier(parsed.value.newName)) {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "not a valid Zig identifier");
+            return;
+        }
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+        const pos: resolve.Position = .{ .line = parsed.value.position.line, .character = parsed.value.position.character };
+
+        const def = resolve.resolveAt(parsed_file.ast, tree.*, pos) orelse {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "nothing to rename at this position");
+            return;
+        };
+        const target_name = nameOfDefinition(parsed_file.ast, def);
+
+        const refs = try resolve.findReferences(self.gpa, parsed_file.ast, tree.*, target_name, def.line, def.character);
+        defer self.gpa.free(refs);
+
+        const TextEditResult = struct { range: Range, newText: []const u8 };
+        var edits: std.ArrayList(TextEditResult) = .empty;
+        defer edits.deinit(self.gpa);
+
+        try edits.append(self.gpa, .{
+            .range = .{
+                .start = .{ .line = def.line, .character = def.character },
+                .end = .{ .line = def.line, .character = def.end_character },
+            },
+            .newText = parsed.value.newName,
+        });
+        for (refs) |r| {
+            try edits.append(self.gpa, .{
+                .range = .{
+                    .start = .{ .line = r.line, .character = r.character },
+                    .end = .{ .line = r.line, .character = r.end_character },
+                },
+                .newText = parsed.value.newName,
+            });
+        }
+
+        // `WorkspaceEdit.changes` is a JSON object keyed by URI, which a
+        // comptime-known struct can't represent — this is exactly what
+        // `std.json.ArrayHashMap` exists for (see its doc comment).
+        const Changes = std.json.ArrayHashMap([]const TextEditResult);
+        var changes: Changes = .{};
+        defer changes.deinit(self.gpa);
+        try changes.map.put(self.gpa, uri, edits.items);
+
+        const WorkspaceEditResult = struct { changes: Changes };
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, WorkspaceEditResult{ .changes = changes });
+    }
+
+    fn handleSignatureHelp(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct {
+            textDocument: struct { uri: []const u8 },
+            position: Position,
+        };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/signatureHelp params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+        const pos: resolve.Position = .{ .line = parsed.value.position.line, .character = parsed.value.position.character };
+
+        const ctx = try resolve.callContextAt(self.gpa, parsed_file.ast, pos) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+        const callee_name = parsed_file.ast.tokenSlice(ctx.callee_token);
+
+        var signature: ?[]const u8 = null;
+
+        if (tree.find(callee_name)) |item| {
+            if (item.kind == .function) signature = item.signature;
+        }
+        if (signature == null) {
+            if (resolve.fieldAccessAtToken(parsed_file.ast, ctx.callee_token)) |fa| {
+                if (try self.resolveCrossFile(uri, parsed_file.ast, fa)) |cross| {
+                    self.gpa.free(cross.uri);
+                    // `cross.def.signature` is borrowed from the imported
+                    // file's Ast, which stays cached in `self.parse_cache`
+                    // for the rest of this synchronous handler — safe to
+                    // use directly without copying it out.
+                    signature = cross.def.signature;
+                }
+            }
+        }
+
+        const sig = signature orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+
+        const SignatureInfoResult = struct { label: []const u8 };
+        const SignatureHelpResult = struct {
+            signatures: []const SignatureInfoResult,
+            activeSignature: u32 = 0,
+            activeParameter: u32,
+        };
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, SignatureHelpResult{
+            .signatures = &.{.{ .label = sig }},
+            .activeParameter = ctx.active_parameter,
+        });
     }
 };
 
@@ -1311,4 +1531,140 @@ test "textDocument/semanticTokens/full advertises a legend and returns delta-enc
     try std.testing.expectEqual(@as(i64, 3), data[2].integer);
     try std.testing.expectEqual(@as(i64, 0), data[3].integer);
     try std.testing.expectEqual(@as(i64, 1), data[4].integer);
+}
+
+test "textDocument/references finds every call site, excluding the declaration by default" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\nfn a() void {\n    helper();\n}\nfn b() void {\n    helper();\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/references","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":0,"character":3},"context":{"includeDeclaration":false}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqual(@as(i64, 2), items[0].object.get("range").?.object.get("start").?.object.get("line").?.integer);
+    try std.testing.expectEqual(@as(i64, 5), items[1].object.get("range").?.object.get("start").?.object.get("line").?.integer);
+}
+
+test "textDocument/references with includeDeclaration adds the declaration site" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\nfn a() void {\n    helper();\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/references","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":0,"character":3},"context":{"includeDeclaration":true}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+}
+
+test "textDocument/rename produces a WorkspaceEdit renaming every occurrence" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\nfn main() void {\n    helper();\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":0,"character":3},"newName":"renamedHelper"}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const changes = parsed.value.object.get("result").?.object.get("changes").?.object;
+    const edits = changes.get("file:///a.zig").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), edits.len);
+    for (edits) |edit| {
+        try std.testing.expectEqualStrings("renamedHelper", edit.object.get("newText").?.string);
+    }
+}
+
+test "textDocument/rename rejects an invalid identifier" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/rename","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":0,"character":3},"newName":"3invalid"}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.contains("error"));
+}
+
+test "textDocument/signatureHelp reports the signature and active parameter" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\nfn main() void {\n    _ = add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    // Cursor right after "add(1, " — on the second argument.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":4,"character":15}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqual(@as(i64, 1), result.get("activeParameter").?.integer);
+    const signatures = result.get("signatures").?.array.items;
+    try std.testing.expectEqualStrings("fn add(a: i32, b: i32) i32", signatures[0].object.get("label").?.string);
+}
+
+test "textDocument/signatureHelp works across files via @import" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/helpers.zig","text":"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const helpers = @import(\"helpers.zig\");\nfn main() void {\n    _ = helpers.add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":2,"character":23}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const signatures = parsed.value.object.get("result").?.object.get("signatures").?.array.items;
+    try std.testing.expectEqualStrings("pub fn add(a: i32, b: i32) i32", signatures[0].object.get("label").?.string);
 }

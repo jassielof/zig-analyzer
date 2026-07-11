@@ -174,16 +174,67 @@ pub fn resolveTopLevel(ast: Ast, item_tree: ItemTree, name: []const u8) ?Definit
     return definitionForRootItem(ast, name);
 }
 
+/// A reference-site location — like `Definition` but without `signature`,
+/// since a reference isn't itself a declaration.
+pub const Reference = struct {
+    line: u32,
+    character: u32,
+    end_character: u32,
+};
+
+/// Finds every identifier token in `ast` named `target_name` that
+/// resolves (via `resolveAt`, the same local-scope-then-item-tree lookup
+/// go-to-definition uses) to the exact declaration at
+/// `target_line`/`target_character`. This is what makes "find references"
+/// safe against false positives from an unrelated same-named local in a
+/// different function: each candidate is independently re-resolved and
+/// only kept if it points at the same place, rather than a bare text
+/// match. The declaration site itself is not included — callers that want
+/// it (e.g. rename) already have it from whatever resolved `target_name`
+/// in the first place.
+pub fn findReferences(
+    gpa: std.mem.Allocator,
+    ast: Ast,
+    item_tree: ItemTree,
+    target_name: []const u8,
+    target_line: u32,
+    target_character: u32,
+) ![]Reference {
+    var out: std.ArrayList(Reference) = .empty;
+    errdefer out.deinit(gpa);
+
+    var idx: Ast.TokenIndex = 0;
+    while (idx < ast.tokens.len) : (idx += 1) {
+        if (ast.tokenTag(idx) != .identifier) continue;
+        if (!std.mem.eql(u8, ast.tokenSlice(idx), target_name)) continue;
+
+        const loc = ast.tokenLocation(0, idx);
+        const line: u32 = @intCast(loc.line);
+        const character: u32 = @intCast(loc.column);
+        if (line == target_line and character == target_character) continue; // the declaration itself
+
+        const pos: Position = .{ .line = line, .character = character };
+        const resolved = resolveAt(ast, item_tree, pos) orelse continue;
+        if (resolved.line != target_line or resolved.character != target_character) continue;
+
+        try out.append(gpa, .{
+            .line = line,
+            .character = character,
+            .end_character = @intCast(character + target_name.len),
+        });
+    }
+
+    return out.toOwnedSlice(gpa);
+}
+
 pub const FieldAccess = struct { base: []const u8, field: []const u8 };
 
-/// If the identifier at `pos` is the right-hand side of a simple
-/// `base.field` access, returns both names — used for cross-file
-/// resolution when `base` is a local import binding
-/// (`const base = @import("...")`). Only a single `.` hop is recognized;
-/// `a.b.c` resolves at most `b.c` against `b`'s immediate base `a`.
-pub fn fieldAccessAt(ast: Ast, pos: Position) ?FieldAccess {
-    const offset = positionToOffset(ast.source, pos);
-    const field_token = identifierTokenAt(ast, offset) orelse return null;
+/// If `field_token` is the right-hand side of a simple `base.field`
+/// access, returns both names — used for cross-file resolution when
+/// `base` is a local import binding (`const base = @import("...")`).
+/// Only a single `.` hop is recognized; `a.b.c` resolves at most `b.c`
+/// against `b`'s immediate base `a`.
+pub fn fieldAccessAtToken(ast: Ast, field_token: Ast.TokenIndex) ?FieldAccess {
     if (field_token < 2) return null;
     if (ast.tokenTag(field_token - 1) != .period) return null;
     if (ast.tokenTag(field_token - 2) != .identifier) return null;
@@ -191,6 +242,14 @@ pub fn fieldAccessAt(ast: Ast, pos: Position) ?FieldAccess {
         .base = ast.tokenSlice(field_token - 2),
         .field = ast.tokenSlice(field_token),
     };
+}
+
+/// `fieldAccessAtToken`, but starting from a position instead of an
+/// already-known token index.
+pub fn fieldAccessAt(ast: Ast, pos: Position) ?FieldAccess {
+    const offset = positionToOffset(ast.source, pos);
+    const field_token = identifierTokenAt(ast, offset) orelse return null;
+    return fieldAccessAtToken(ast, field_token);
 }
 
 /// Collects the parameter and immediate-body local variable names in
@@ -228,6 +287,63 @@ pub fn collectLocalScopeNames(
         }
         return; // found the enclosing function; nothing else to check
     }
+}
+
+pub const CallContext = struct {
+    /// The identifier token being called — either the callee directly
+    /// (`helper(`) or the field name of a cross-file call
+    /// (`helpers.add(`, where this points at `add`; the caller checks
+    /// `fieldAccessAtToken` on it to find the `helpers` base).
+    callee_token: Ast.TokenIndex,
+    /// 0-based index of the argument `pos` falls within, counted by
+    /// top-level commas since the call's open paren (nested calls'
+    /// commas don't count, tracked via the same paren-depth stack).
+    active_parameter: u32,
+};
+
+/// Finds the innermost function call `pos` is positioned inside the
+/// argument list of, and which argument slot it's in — the two things
+/// `textDocument/signatureHelp` needs. Returns `null` if `pos` isn't
+/// inside any call's parentheses, or the token immediately before the
+/// enclosing `(` isn't an identifier (e.g. it's a grouping paren around
+/// an expression, not a call).
+pub fn callContextAt(gpa: std.mem.Allocator, ast: Ast, pos: Position) !?CallContext {
+    const offset = positionToOffset(ast.source, pos);
+
+    var open_parens: std.ArrayList(Ast.TokenIndex) = .empty;
+    defer open_parens.deinit(gpa);
+    var comma_counts: std.ArrayList(u32) = .empty;
+    defer comma_counts.deinit(gpa);
+
+    var idx: Ast.TokenIndex = 0;
+    while (idx < ast.tokens.len and ast.tokenStart(idx) < offset) : (idx += 1) {
+        switch (ast.tokenTag(idx)) {
+            .l_paren => {
+                try open_parens.append(gpa, idx);
+                try comma_counts.append(gpa, 0);
+            },
+            .r_paren => {
+                if (open_parens.items.len > 0) {
+                    _ = open_parens.pop();
+                    _ = comma_counts.pop();
+                }
+            },
+            .comma => {
+                if (comma_counts.items.len > 0) comma_counts.items[comma_counts.items.len - 1] += 1;
+            },
+            else => {},
+        }
+    }
+
+    if (open_parens.items.len == 0) return null;
+    const open_paren = open_parens.items[open_parens.items.len - 1];
+    const active_parameter = comma_counts.items[comma_counts.items.len - 1];
+
+    if (open_paren == 0) return null;
+    const callee_token = open_paren - 1;
+    if (ast.tokenTag(callee_token) != .identifier) return null;
+
+    return .{ .callee_token = callee_token, .active_parameter = active_parameter };
 }
 
 const testing = std.testing;
@@ -299,4 +415,67 @@ test "collectLocalScopeNames finds params and immediate-body locals" {
     try testing.expectEqual(@as(usize, 2), names.items.len);
     try testing.expectEqualStrings("a", names.items[0]);
     try testing.expectEqualStrings("b", names.items[1]);
+}
+
+test "findReferences finds every call site of a top-level function" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn helper() void {}\nfn a() void {\n    helper();\n}\nfn b() void {\n    helper();\n}\n", .zig);
+    defer ast.deinit(gpa);
+    var tree = try item_tree_query.build(gpa, ast);
+    defer tree.deinit(gpa);
+
+    const refs = try findReferences(gpa, ast, tree, "helper", 0, 3);
+    defer gpa.free(refs);
+
+    try testing.expectEqual(@as(usize, 2), refs.len);
+    try testing.expectEqual(@as(u32, 2), refs[0].line);
+    try testing.expectEqual(@as(u32, 5), refs[1].line);
+}
+
+test "findReferences does not cross into an unrelated same-named local" {
+    // The false-positive guard findReferences exists for: `x` in `g` is a
+    // *different* declaration than the one being searched for in `f`,
+    // even though the name matches textually.
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn f() void {\n    const x = 1;\n    _ = x;\n}\nfn g() void {\n    const x = 2;\n    _ = x;\n}\n", .zig);
+    defer ast.deinit(gpa);
+    var tree = try item_tree_query.build(gpa, ast);
+    defer tree.deinit(gpa);
+
+    // "x" declared in f, at line 1 character 10.
+    const refs = try findReferences(gpa, ast, tree, "x", 1, 10);
+    defer gpa.free(refs);
+
+    try testing.expectEqual(@as(usize, 1), refs.len);
+    try testing.expectEqual(@as(u32, 2), refs[0].line); // only the "_ = x;" inside f
+}
+
+test "callContextAt finds the active parameter in a single-line call" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\nfn main() void {\n    _ = add(1, 2);\n}\n", .zig);
+    defer ast.deinit(gpa);
+
+    // Cursor right after "add(1, " — on the second argument.
+    const ctx = (try callContextAt(gpa, ast, .{ .line = 4, .character = 15 })).?;
+    try testing.expectEqualStrings("add", ast.tokenSlice(ctx.callee_token));
+    try testing.expectEqual(@as(u32, 1), ctx.active_parameter);
+}
+
+test "callContextAt ignores commas inside a nested call" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\nfn id(x: i32) i32 {\n    return x;\n}\nfn main() void {\n    _ = add(id(1, 2), 3);\n}\n", .zig);
+    defer ast.deinit(gpa);
+
+    // Cursor inside id(1, |2), still argument 0 of the outer add(...).
+    const line = "    _ = add(id(1, 2), 3);";
+    const col: u32 = @intCast(std.mem.indexOf(u8, line, "2), 3").?);
+    const ctx = (try callContextAt(gpa, ast, .{ .line = 7, .character = col })).?;
+    try testing.expectEqualStrings("id", ast.tokenSlice(ctx.callee_token));
+}
+
+test "callContextAt returns null outside any call" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn f() void {}\n", .zig);
+    defer ast.deinit(gpa);
+    try testing.expectEqual(@as(?CallContext, null), try callContextAt(gpa, ast, .{ .line = 0, .character = 0 }));
 }
