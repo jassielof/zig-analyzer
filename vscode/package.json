@@ -5,6 +5,7 @@
   "categories": [
     "Programming Languages"
   ],
+  "readme": "README.adoc",
   "version": "0.1.0",
   "description": "Zig Analyzer provides language server support for the Zig programming language.",
   "main": "index.js",
@@ -38,8 +39,18 @@
           ".zon"
         ],
         "aliases": [
-          "Zig"
-        ]
+          "Zig",
+          "zig",
+          "ZON"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "zig",
+        "scopeName": "source.zig",
+        "path": "./syntaxes/zig.tmLanguage.json"
       }
     ]
   },

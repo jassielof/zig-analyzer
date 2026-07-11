@@ -1,6 +1,2 @@
-# Zig
 .zig-cache
 zig-out
-
-# JavaScript
-node_modules
