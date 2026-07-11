@@ -13,6 +13,7 @@ const parse = @import("analysis/queries/parse.zig");
 const item_tree = @import("analysis/queries/item_tree.zig");
 const resolve = @import("analysis/queries/resolve.zig");
 const imports = @import("analysis/queries/imports.zig");
+const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
 
 /// Where the server is in the LSP lifecycle state machine (see the LSP spec's
 /// "Basic JSON Structures" / lifecycle section). Method handling depends on
@@ -211,6 +212,26 @@ pub const Server = struct {
                 .severity = if (err.is_note) 4 else 1,
                 .message = try self.gpa.dupe(u8, message.written()),
             });
+        }
+
+        // Semantic checks run on error-recovered ASTs too in principle,
+        // but a file mid-syntax-error is exactly when they're least
+        // trustworthy (e.g. a dangling brace can make half the file look
+        // like one giant unused local). Only run them once it parses clean.
+        if (ast.errors.len == 0) {
+            const semantic = try semantic_diagnostics.check(self.gpa, ast);
+            defer semantic_diagnostics.freeDiagnostics(self.gpa, semantic);
+
+            for (semantic) |d| {
+                try diagnostics.append(self.gpa, .{
+                    .range = .{
+                        .start = .{ .line = d.line, .character = d.character },
+                        .end = .{ .line = d.line, .character = d.end_character },
+                    },
+                    .severity = @intFromEnum(d.severity),
+                    .message = try self.gpa.dupe(u8, d.message),
+                });
+            }
         }
 
         try jsonrpc.writeNotification(writer, self.gpa, "textDocument/publishDiagnostics", .{
@@ -647,4 +668,52 @@ test "editing an imported file's function body does not recompute the importer's
     var parsed_after = try std.json.parseFromSlice(std.json.Value, gpa, responses_after.messages.items[0], .{});
     defer parsed_after.deinit();
     try std.testing.expectEqualStrings("file:///proj/helpers.zig", parsed_after.value.object.get("result").?.object.get("uri").?.string);
+}
+
+test "publishDiagnostics includes semantic diagnostics for syntactically valid files" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn f() void {\n    const unused = 1;\n}\nfn f() void {}\n"}}}
+    });
+    defer opened.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), opened.messages.items.len);
+    var diag = try std.json.parseFromSlice(std.json.Value, gpa, opened.messages.items[0], .{});
+    defer diag.deinit();
+
+    const items = diag.value.object.get("params").?.object.get("diagnostics").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), items.len); // unused local + duplicate fn
+
+    var saw_warning = false;
+    var saw_error = false;
+    for (items) |item| {
+        const severity = item.object.get("severity").?.integer;
+        if (severity == 2) saw_warning = true;
+        if (severity == 1) saw_error = true;
+    }
+    try std.testing.expect(saw_warning);
+    try std.testing.expect(saw_error);
+}
+
+test "semantic diagnostics are skipped when the file has a syntax error" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn f() void {\n    const unused = ;\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var diag = try std.json.parseFromSlice(std.json.Value, gpa, opened.messages.items[0], .{});
+    defer diag.deinit();
+    const items = diag.value.object.get("params").?.object.get("diagnostics").?.array.items;
+
+    // Only the syntax error itself, not an "unused local" diagnostic
+    // riding along on a broken parse.
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expect(std.mem.indexOf(u8, items[0].object.get("message").?.string, "unused") == null);
 }
