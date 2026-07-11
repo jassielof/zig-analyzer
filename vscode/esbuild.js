@@ -1,6 +1,4 @@
-// Bundles the extension to a single CommonJS file so `vsce package
-// --no-dependencies` doesn't need to understand pnpm's node_modules
-// layout — see project plan §5.
+// Bundles the extension to a single CommonJS file so `vsce package --no-dependencies` doesn't need to understand pnpm's node_modules layout — see project plan §5.
 
 const esbuild = require("esbuild");
 

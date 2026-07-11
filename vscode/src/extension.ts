@@ -1,6 +1,6 @@
-// Client scaffolding only — no server lifecycle management. The server
-// binary path is user-configured (`zigAnalyzer.serverPath`) rather than
-// auto-downloaded/managed; see project plan §5.
+// Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) rather than auto-downloaded/managed; see project plan §5.
+
+// TODO: Add a "run build step" command or similar, which is based on `zig build --list-steps`, where it gets the steps and its descriptions, to then run `zig build <step>`, this could be a command option or a sidebar? maybe?
 
 import * as vscode from "vscode";
 import {
