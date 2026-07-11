@@ -417,13 +417,35 @@ pub const Server = struct {
         };
         defer self.gpa.free(any.uri);
 
-        const HoverContents = struct { kind: []const u8 = "plaintext", value: []const u8 };
+        // Doctest lookup happens against the *declaration's* file, which
+        // for a cross-file hover (`helpers.add`) is the imported file,
+        // not the requesting one — re-fetching via the cache is a hit in
+        // that case (resolveRequestPosition already parsed it) and a
+        // guaranteed hit in the same-file case.
+        var doctest: ?[]const u8 = null;
+        if (self.documents.get(any.uri)) |target_doc| {
+            const target_parsed = try parse.parse(&self.parse_cache, self.gpa, any.uri, target_doc.text, target_doc.revision);
+            const decl_name = nameOfDefinition(target_parsed.ast, any.def);
+            doctest = resolve.findDoctest(target_parsed.ast, decl_name);
+        }
+
+        const value = if (doctest) |dt|
+            try std.fmt.allocPrint(
+                self.gpa,
+                "```zig\n{s}\n```\n\n---\n\n**Example**\n```zig\n{s}\n```",
+                .{ any.def.signature, dt },
+            )
+        else
+            try std.fmt.allocPrint(self.gpa, "```zig\n{s}\n```", .{any.def.signature});
+        defer self.gpa.free(value);
+
+        const HoverContents = struct { kind: []const u8 = "markdown", value: []const u8 };
         const HoverResult = struct {
             contents: HoverContents,
             range: Range,
         };
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, HoverResult{
-            .contents = .{ .value = any.def.signature },
+            .contents = .{ .value = value },
             .range = .{
                 .start = .{ .line = any.def.line, .character = any.def.character },
                 .end = .{ .line = any.def.line, .character = any.def.end_character },
@@ -1330,7 +1352,31 @@ test "textDocument/hover returns a function's signature" {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
     defer parsed.deinit();
     const result = parsed.value.object.get("result").?.object;
-    try std.testing.expectEqualStrings("fn helper() void", result.get("contents").?.object.get("value").?.string);
+    try std.testing.expectEqualStrings("markdown", result.get("contents").?.object.get("kind").?.string);
+    try std.testing.expectEqualStrings("```zig\nfn helper() void\n```", result.get("contents").?.object.get("value").?.string);
+}
+
+test "textDocument/hover includes a matching doctest as an Example section" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"test addOne {\n    _ = addOne(41);\n}\n\nfn addOne(number: i32) i32 {\n    return number + 1;\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":4,"character":4}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const value = parsed.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value, "fn addOne(number: i32) i32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value, "**Example**") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value, "addOne(41)") != null);
 }
 
 test "textDocument/documentSymbol lists top-level declarations" {

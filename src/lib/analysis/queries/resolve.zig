@@ -84,6 +84,24 @@ fn paramSignature(ast: Ast, name_token: Ast.TokenIndex, type_expr: ?Ast.Node.Ind
     return ast.source[name_start..end];
 }
 
+/// Zig's "doctest" convention: `test <ident> { ... }` (an identifier
+/// name, not a string) associates that test with the declaration
+/// `<ident>` names — as opposed to `test "some string" { ... }`, an
+/// ordinary named test with no such association. Returns the matching
+/// test's body source (including the enclosing braces), or `null` if
+/// `decl_name` has no such test in `ast`.
+pub fn findDoctest(ast: Ast, decl_name: []const u8) ?[]const u8 {
+    for (ast.rootDecls()) |node| {
+        if (ast.nodeTag(node) != .test_decl) continue;
+        const name_token_opt, const body_node = ast.nodeData(node).opt_token_and_node;
+        const name_token = name_token_opt.unwrap() orelse continue;
+        if (ast.tokenTag(name_token) != .identifier) continue; // string-named test, not a doctest
+        if (!std.mem.eql(u8, ast.tokenSlice(name_token), decl_name)) continue;
+        return ast.getNodeSource(body_node);
+    }
+    return null;
+}
+
 /// Re-walks root decls for the token position of `name` — cheap (root
 /// decls only, no recursion into bodies) and keeps `Item` itself free of
 /// position bookkeeping that only resolution needs. Also the entry point
@@ -478,4 +496,36 @@ test "callContextAt returns null outside any call" {
     var ast = try Ast.parse(gpa, "fn f() void {}\n", .zig);
     defer ast.deinit(gpa);
     try testing.expectEqual(@as(?CallContext, null), try callContextAt(gpa, ast, .{ .line = 0, .character = 0 }));
+}
+
+test "findDoctest matches an identifier-named test to its declaration" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa,
+        \\test addOne {
+        \\    try std.testing.expectEqual(42, addOne(41));
+        \\}
+        \\
+        \\fn addOne(number: i32) i32 {
+        \\    return number + 1;
+        \\}
+        \\
+    , .zig);
+    defer ast.deinit(gpa);
+
+    const body = findDoctest(ast, "addOne").?;
+    try testing.expect(std.mem.indexOf(u8, body, "expectEqual") != null);
+}
+
+test "findDoctest ignores string-named tests" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "test \"addOne works\" {}\nfn addOne(n: i32) i32 { return n + 1; }\n", .zig);
+    defer ast.deinit(gpa);
+    try testing.expectEqual(@as(?[]const u8, null), findDoctest(ast, "addOne"));
+}
+
+test "findDoctest returns null when there's no matching test" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn addOne(n: i32) i32 { return n + 1; }\n", .zig);
+    defer ast.deinit(gpa);
+    try testing.expectEqual(@as(?[]const u8, null), findDoctest(ast, "addOne"));
 }
