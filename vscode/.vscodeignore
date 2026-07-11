@@ -9,5 +9,6 @@ pnpm-lock.yaml
 pnpm-workspace.yaml
 tsconfig.json
 esbuild.js
+eslint.config.js
 *.vsix
 dist/**/*.map
