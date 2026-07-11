@@ -11,6 +11,7 @@
 //! integration tests use, driving a real `Server` through real framed
 //! JSON-RPC messages — no shortcuts that call internal APIs the wire
 //! protocol wouldn't actually exercise.
+// TODO: This should be moved as integration tests under tests/invalid.zig and imported in tests/suite.zig.
 
 const std = @import("std");
 const server_mod = @import("server.zig");

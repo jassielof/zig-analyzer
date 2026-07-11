@@ -1,37 +1,25 @@
 //! Public module root for zig-analyzer's analysis core.
 
-pub const analysis = struct {
-    pub const query = @import("analysis/query.zig");
-    pub const queries = struct {
-        pub const parse = @import("analysis/queries/parse.zig");
-        pub const item_tree = @import("analysis/queries/item_tree.zig");
-        pub const resolve = @import("analysis/queries/resolve.zig");
-        pub const imports = @import("analysis/queries/imports.zig");
-        pub const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
-    };
-};
+// TODO: There should be a way to render doctests on hover for declarations, for example, assume the following Zig code:
+// ```zig
+// test addOne {
+//     // A test name can also be written using an identifier.
+//     // This is a doctest, and serves as documentation for `addOne`.
+//     try std.testing.expectEqual(42, addOne(41));
+// }
 
-pub const protocol = struct {
-    pub const framing = @import("protocol/framing.zig");
-    pub const jsonrpc = @import("protocol/jsonrpc.zig");
-    pub const harness = @import("protocol/harness.zig");
-};
-
+// /// The function `addOne` adds one to the number given as its argument.
+// fn addOne(number: i32) i32 {
+//     return number + 1;
+// }
+// ```
+// The function addOne() should be able to also show the test as part of its documentation, under a "Doctests" or "Examples" (prefereably, as doctest is internal targeted, not external) section.
+pub const analysis = @import("analysis.zig");
+pub const protocol = @import("protocol.zig");
 pub const server = @import("server.zig");
 pub const documents = @import("documents.zig");
-const invalidation_test = @import("invalidation_test.zig");
+pub const invalidation_test = @import("invalidation_test.zig");
 
-test {
-    _ = analysis.query;
-    _ = analysis.queries.parse;
-    _ = analysis.queries.item_tree;
-    _ = analysis.queries.resolve;
-    _ = analysis.queries.imports;
-    _ = analysis.queries.semantic_diagnostics;
-    _ = protocol.framing;
-    _ = protocol.jsonrpc;
-    _ = protocol.harness;
-    _ = server;
-    _ = documents;
-    _ = invalidation_test;
+comptime {
+    @import("std").testing.refAllDecls(@This());
 }

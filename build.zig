@@ -1,29 +1,32 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const mod_name = "zig_analyzer";
+    const exe_name = "zig-analyzer";
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("zig_analyzer", .{
+    const mod = b.addModule(mod_name, .{
         .root_source_file = b.path("src/lib/root.zig"),
         .target = target,
     });
 
+    const run_step = b.step("cli", "Test the CLI");
+
     const exe = b.addExecutable(.{
-        .name = "zig-analyzer",
+        .name = exe_name,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zig_analyzer", .module = mod },
+                .{ .name = mod_name, .module = mod },
             },
         }),
     });
 
     b.installArtifact(exe);
-
-    const run_step = b.step("cli", "Test the CLI");
 
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
@@ -32,19 +35,28 @@ pub fn build(b: *std.Build) void {
 
     if (b.args) |args| run_cmd.addArgs(args);
 
+    const test_step = b.step("test", "Run the test suite");
+
     const mod_tests = b.addTest(.{
+        .name = "Zig Analyzer library",
         .root_module = mod,
     });
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    test_step.dependOn(&run_mod_tests.step);
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+    const integration_tests = b.addTest(.{
+        .name = "Integration Suite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/suite.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = mod_name, .module = mod },
+            },
+        }),
     });
 
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    const test_step = b.step("test", "Run the test suite");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+    test_step.dependOn(&run_integration_tests.step);
 }

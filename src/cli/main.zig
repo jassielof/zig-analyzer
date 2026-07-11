@@ -1,5 +1,4 @@
-//! Entry point. Argument parsing and stdio wiring only — no analysis logic
-//! lives here.
+//! Entry point. Argument parsing and stdio wiring only — no analysis logic lives here.
 
 const std = @import("std");
 const Io = std.Io;
@@ -39,8 +38,4 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     return server.exit_code;
-}
-
-test {
-    _ = zig_analyzer;
 }
