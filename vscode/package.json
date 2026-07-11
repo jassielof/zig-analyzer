@@ -20,6 +20,9 @@
   "engines": {
     "vscode": "^1.105.0"
   },
+  "activationEvents": [
+    "onLanguage:zig"
+  ],
   "keywords": [],
   "author": "Jassiel Ovando",
   "license": "MPL-2.0",
@@ -53,6 +56,5 @@
         "path": "./syntaxes/zig.tmLanguage.json"
       }
     ]
-  },
-  "type": "module"
+  }
 }
