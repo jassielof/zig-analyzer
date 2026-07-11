@@ -1,0 +1,40 @@
+name: VS Code CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vscode/**"
+      - ".github/workflows/vscode.yaml"
+  pull_request:
+    paths:
+      - "vscode/**"
+      - ".github/workflows/vscode.yaml"
+
+concurrency:
+  group: vscode-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: vscode
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup PNPM
+        uses: pnpm/action-setup@v6
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          cache: pnpm
+          cache-dependency-path: vscode/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # TODO(phase 8): `pnpm run typecheck` (tsc --noEmit) and
+      # `pnpm run package` (esbuild bundle + vsce package --no-dependencies)
+      # once src/extension.ts, tsconfig.json, and esbuild.js exist.
