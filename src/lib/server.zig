@@ -430,6 +430,7 @@ pub const Server = struct {
         }
 
         const value = if (doctest) |dt|
+        // FIXME: The doctest example code snippet is being wrapped in braces and indented, these should be striped.
             try std.fmt.allocPrint(
                 self.gpa,
                 \\```zig
@@ -438,7 +439,7 @@ pub const Server = struct {
                 \\
                 \\---
                 \\
-                \\## Doctest Example
+                \\## Doctest example
                 \\
                 \\```zig
                 \\{s}
