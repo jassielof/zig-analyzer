@@ -404,6 +404,47 @@ pub const Server = struct {
         });
     }
 
+    /// `resolve.findDoctest` returns the raw `{ ... }` block source —
+    /// braces and whatever indentation the `test` block happened to sit
+    /// at in the source file both included. Strips the braces and
+    /// dedents by the block's minimum common leading whitespace, so the
+    /// doctest renders as a clean, left-aligned snippet in hover instead
+    /// of carrying that indentation along with it.
+    fn formatDoctestBody(gpa: std.mem.Allocator, raw: []const u8) ![]u8 {
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        const inner = if (trimmed.len >= 2 and trimmed[0] == '{' and trimmed[trimmed.len - 1] == '}')
+            trimmed[1 .. trimmed.len - 1]
+        else
+            trimmed;
+
+        var min_indent: usize = std.math.maxInt(usize);
+        var lines = std.mem.splitScalar(u8, inner, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.trimEnd(u8, line, " \t\r").len == 0) continue; // blank lines don't count
+            var indent: usize = 0;
+            while (indent < line.len and (line[indent] == ' ' or line[indent] == '\t')) indent += 1;
+            min_indent = @min(min_indent, indent);
+        }
+        if (min_indent == std.math.maxInt(usize)) min_indent = 0;
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        lines = std.mem.splitScalar(u8, inner, '\n');
+        var first = true;
+        while (lines.next()) |line| {
+            const stripped = std.mem.trimEnd(u8, line, " \t\r");
+            const dedented = if (stripped.len > min_indent) stripped[min_indent..] else "";
+            if (!first) try out.append(gpa, '\n');
+            try out.appendSlice(gpa, dedented);
+            first = false;
+        }
+
+        const result = std.mem.trim(u8, out.items, "\n");
+        const owned = try gpa.dupe(u8, result);
+        out.deinit(gpa);
+        return owned;
+    }
+
     fn handleHover(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
         var parsed = std.json.parseFromValue(DefinitionParams, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
             try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/hover params");
@@ -422,15 +463,17 @@ pub const Server = struct {
         // not the requesting one — re-fetching via the cache is a hit in
         // that case (resolveRequestPosition already parsed it) and a
         // guaranteed hit in the same-file case.
-        var doctest: ?[]const u8 = null;
+        var doctest: ?[]u8 = null;
+        defer if (doctest) |dt| self.gpa.free(dt);
         if (self.documents.get(any.uri)) |target_doc| {
             const target_parsed = try parse.parse(&self.parse_cache, self.gpa, any.uri, target_doc.text, target_doc.revision);
             const decl_name = nameOfDefinition(target_parsed.ast, any.def);
-            doctest = resolve.findDoctest(target_parsed.ast, decl_name);
+            if (resolve.findDoctest(target_parsed.ast, decl_name)) |raw| {
+                doctest = try formatDoctestBody(self.gpa, raw);
+            }
         }
 
         const value = if (doctest) |dt|
-        // FIXME: The doctest example code snippet is being wrapped in braces and indented, these should be striped.
             try std.fmt.allocPrint(
                 self.gpa,
                 \\```zig
@@ -1394,8 +1437,13 @@ test "textDocument/hover includes a matching doctest as an Example section" {
     defer parsed.deinit();
     const value = parsed.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
     try std.testing.expect(std.mem.indexOf(u8, value, "fn addOne(number: i32) i32") != null);
-    try std.testing.expect(std.mem.indexOf(u8, value, "**Example**") != null);
-    try std.testing.expect(std.mem.indexOf(u8, value, "addOne(41)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value, "## Doctest example") != null);
+    // The braces and the source file's 4-space body indentation must be
+    // stripped: the doctest should appear as a clean, left-aligned
+    // "_ = addOne(41);" line, not "{\n    _ = addOne(41);\n}".
+    try std.testing.expect(std.mem.indexOf(u8, value, "_ = addOne(41);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value, "{\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, value, "    _ = addOne") == null);
 }
 
 test "textDocument/documentSymbol lists top-level declarations" {
