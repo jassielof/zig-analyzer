@@ -7,3 +7,6 @@
 [submodule "references/vscode-zig"]
 	path = references/vscode-zig
 	url = https://codeberg.org/ziglang/vscode-zig
+[submodule "references/known-folders"]
+	path = references/known-folders
+	url = https://github.com/ziglibs/known-folders
