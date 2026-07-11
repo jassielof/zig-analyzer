@@ -53,7 +53,7 @@ pub fn run(gpa: std.mem.Allocator, server: *Server, requests: []const []const u8
 
 test "run collects zero responses for pure notifications" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     var responses = try run(gpa, &server, &.{
         \\{"jsonrpc":"2.0","method":"initialized"}
     });

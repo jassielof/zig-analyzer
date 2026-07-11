@@ -20,6 +20,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("zigAnalyzer.runBuildStep", () =>
       runBuildStep(),
     ),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("zigAnalyzer.formatter")) {
+        void client?.sendNotification("workspace/didChangeConfiguration", {
+          settings: { formatter: getFormatterConfig() },
+        });
+      }
+    }),
   );
 
   void start();
@@ -44,6 +51,9 @@ async function start(): Promise<void> {
     documentSelector: [{ scheme: "file", language: "zig" }],
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.zig"),
+    },
+    initializationOptions: {
+      formatter: getFormatterConfig(),
     },
   };
 
@@ -75,6 +85,25 @@ function getServerPath(): string | undefined {
     return undefined;
   }
   return configured;
+}
+
+interface FormatterConfig {
+  command: string;
+  args: string[];
+}
+
+/// Sent to the server as both `initialize`'s `initializationOptions` and
+/// `workspace/didChangeConfiguration`'s `settings` (see
+/// `Server.applyOptions` in src/lib/server.zig — both parse the same
+/// `{ formatter: { command, args } }` shape). The configured command must
+/// behave like `zig fmt --stdin`: read the whole document from stdin,
+/// write the fully formatted result to stdout, exit 0 on success.
+function getFormatterConfig(): FormatterConfig {
+  const config = vscode.workspace.getConfiguration("zigAnalyzer");
+  return {
+    command: config.get<string>("formatter.command", "zig") || "zig",
+    args: config.get<string[]>("formatter.args", ["fmt", "--stdin"]),
+  };
 }
 
 function getZigPath(): string {

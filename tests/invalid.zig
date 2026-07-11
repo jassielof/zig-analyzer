@@ -22,7 +22,7 @@ const testing = std.testing;
 
 test "repeated requests against an unchanged file are cache hits, not recomputes" {
     const gpa = testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var r0 = try harness.run(gpa, &server, &.{
@@ -58,7 +58,7 @@ test "repeated requests against an unchanged file are cache hits, not recomputes
 
 test "editing file A recomputes only A, no matter how much unrelated activity happens around it" {
     const gpa = testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var r0 = try harness.run(gpa, &server, &.{
@@ -136,7 +136,7 @@ test "closing and reopening a file recomputes even with byte-identical text" {
     // across close/reopen) is a conscious decision, not an accident this
     // suite silently stops noticing.
     const gpa = testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var r1 = try harness.run(gpa, &server, &.{

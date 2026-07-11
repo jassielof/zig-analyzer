@@ -19,6 +19,7 @@ pub const analysis = @import("analysis.zig");
 pub const protocol = @import("protocol.zig");
 pub const server = @import("server.zig");
 pub const documents = @import("documents.zig");
+pub const formatting = @import("formatting.zig");
 
 comptime {
     @import("std").testing.refAllDecls(@This());

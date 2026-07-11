@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    var server: zig_analyzer.server.Server = .init(gpa);
+    var server: zig_analyzer.server.Server = .init(gpa, io);
     defer server.deinit();
 
     while (!server.should_exit) {

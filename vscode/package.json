@@ -16,8 +16,7 @@
     "typecheck": "tsc --noEmit",
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "vscode:prepublish": "node esbuild.js --production",
-    "package": "vsce package --no-dependencies"
+    "package": "node esbuild.js --production && vsce package --no-dependencies"
   },
   "qna": "https://github.com/jassielof/zig-analyzer/discussions",
   "repository": {
@@ -103,6 +102,23 @@
           ],
           "default": "off",
           "description": "Traces the communication between VS Code and the zig-analyzer language server."
+        },
+        "zigAnalyzer.formatter.command": {
+          "type": "string",
+          "default": "zig",
+          "scope": "machine-overridable",
+          "markdownDescription": "The formatter executable to run for \"Format Document\". **Must behave like `zig fmt --stdin`**: read the entire document from stdin, write the fully formatted result to stdout, and exit with code 0 on success. A nonzero exit or any stderr output is treated as a formatting failure and the document is left unchanged.\n\nCombined with `#zigAnalyzer.formatter.args#` to build the full command line. Change this if the zero-config standard formatter (`zig fmt`) isn't what you want — e.g. a different Zig toolchain, or a wrapper script that also runs a linter — as long as it honors the stdin/stdout contract above."
+        },
+        "zigAnalyzer.formatter.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "fmt",
+            "--stdin"
+          ],
+          "description": "Arguments passed to zigAnalyzer.formatter.command. The default runs the standard, zero-config `zig fmt --stdin`."
         }
       }
     },
@@ -120,10 +136,11 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Executable paths (zigAnalyzer.serverPath, zigAnalyzer.zigPath) are ignored in untrusted workspaces to prevent a workspace from silently configuring code execution.",
+      "description": "Executable paths (zigAnalyzer.serverPath, zigAnalyzer.zigPath, zigAnalyzer.formatter.command) are ignored in untrusted workspaces to prevent a workspace from silently configuring code execution.",
       "restrictedConfigurations": [
         "zigAnalyzer.serverPath",
-        "zigAnalyzer.zigPath"
+        "zigAnalyzer.zigPath",
+        "zigAnalyzer.formatter.command"
       ]
     }
   },

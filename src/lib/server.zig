@@ -15,6 +15,7 @@ const item_tree = @import("analysis/queries/item_tree.zig");
 const resolve = @import("analysis/queries/resolve.zig");
 const imports = @import("analysis/queries/imports.zig");
 const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
+const formatting = @import("formatting.zig");
 
 /// Where the server is in the LSP lifecycle state machine (see the LSP spec's
 /// "Basic JSON Structures" / lifecycle section). Method handling depends on
@@ -32,6 +33,11 @@ pub const Phase = enum {
 
 pub const Server = struct {
     gpa: std.mem.Allocator,
+    /// Real OS access (process spawning, currently) for features that
+    /// need to shell out — e.g. running a formatter. Everything else in
+    /// this struct is transport-agnostic; this is the one exception,
+    /// scoped to exactly the handlers that need it.
+    io: Io,
     phase: Phase = .uninitialized,
     should_exit: bool = false,
     /// Set once `should_exit` is set. Per spec: 0 if `shutdown` was
@@ -40,15 +46,83 @@ pub const Server = struct {
     documents: documents.Store,
     parse_cache: parse.Cache = .{},
     item_tree_cache: item_tree.Cache = .{},
+    formatter_config: formatting.Config = .{},
+    /// True once `formatter_config` was replaced with something other
+    /// than the struct-literal default above — meaning its strings are
+    /// gpa-owned and must be freed on the next replacement or on
+    /// `deinit`. The default's strings are literals; nothing to free.
+    formatter_config_owned: bool = false,
 
-    pub fn init(gpa: std.mem.Allocator) Server {
-        return .{ .gpa = gpa, .documents = .init(gpa) };
+    pub fn init(gpa: std.mem.Allocator, io: Io) Server {
+        return .{ .gpa = gpa, .io = io, .documents = .init(gpa) };
     }
 
     pub fn deinit(self: *Server) void {
         self.documents.deinit();
         self.parse_cache.deinit(self.gpa);
         self.item_tree_cache.deinit(self.gpa);
+        self.freeFormatterConfigIfOwned();
+    }
+
+    fn freeFormatterConfigIfOwned(self: *Server) void {
+        if (!self.formatter_config_owned) return;
+        self.gpa.free(self.formatter_config.command);
+        for (self.formatter_config.args) |arg| self.gpa.free(arg);
+        self.gpa.free(self.formatter_config.args);
+        self.formatter_config_owned = false;
+    }
+
+    /// Replaces `formatter_config` with an owned copy of `command`/`args`,
+    /// freeing whatever was there before.
+    fn setFormatterConfig(self: *Server, command: []const u8, args: []const []const u8) !void {
+        const new_command = try self.gpa.dupe(u8, command);
+        errdefer self.gpa.free(new_command);
+
+        const new_args = try self.gpa.alloc([]const u8, args.len);
+        errdefer self.gpa.free(new_args);
+        var filled: usize = 0;
+        errdefer for (new_args[0..filled]) |a| self.gpa.free(a);
+        for (args) |arg| {
+            new_args[filled] = try self.gpa.dupe(u8, arg);
+            filled += 1;
+        }
+
+        self.freeFormatterConfigIfOwned();
+        self.formatter_config = .{ .command = new_command, .args = new_args };
+        self.formatter_config_owned = true;
+    }
+
+    const FormatterOptions = struct {
+        command: ?[]const u8 = null,
+        args: ?[]const []const u8 = null,
+    };
+    const ServerOptions = struct {
+        formatter: ?FormatterOptions = null,
+    };
+
+    /// Shared by `initialize`'s `initializationOptions` and
+    /// `workspace/didChangeConfiguration`'s `settings` — both carry the
+    /// same `{ formatter: { command, args } }` shape (see extension.ts).
+    fn applyOptions(self: *Server, options_value: std.json.Value) void {
+        // Absent options (no `initializationOptions`, or a
+        // `didChangeConfiguration` for an unrelated section) is the
+        // common case, not a malformed one — a struct type can't parse
+        // from JSON `null`, so this must be checked before attempting to
+        // parse, not just caught as an error.
+        if (options_value == .null) return;
+
+        var parsed = std.json.parseFromValue(ServerOptions, self.gpa, options_value, .{ .ignore_unknown_fields = true }) catch |err| {
+            std.log.err("ignoring malformed server options: {t}", .{err});
+            return;
+        };
+        defer parsed.deinit();
+
+        const formatter = parsed.value.formatter orelse return;
+        const command = formatter.command orelse "zig";
+        const args = formatter.args orelse &[_][]const u8{ "fmt", "--stdin" };
+        self.setFormatterConfig(command, args) catch |err| {
+            std.log.err("failed to apply formatter config: {t}", .{err});
+        };
     }
 
     /// Dispatches one JSON-RPC message body. Writes a framed response to
@@ -85,6 +159,10 @@ pub const Server = struct {
             try self.handleWorkspaceSymbol(writer, msg);
         } else if (std.mem.eql(u8, msg.method, "textDocument/completion")) {
             try self.handleCompletion(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/formatting")) {
+            try self.handleFormatting(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "workspace/didChangeConfiguration")) {
+            self.handleDidChangeConfiguration(msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -99,6 +177,15 @@ pub const Server = struct {
             try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_request, "server already initialized");
             return;
         }
+
+        const Params = struct { initializationOptions: std.json.Value = .null };
+        if (std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true })) |parsed| {
+            defer parsed.deinit();
+            self.applyOptions(parsed.value.initializationOptions);
+        } else |err| {
+            std.log.err("ignoring malformed initialize params: {t}", .{err});
+        }
+
         const InitializeResult = struct {
             capabilities: struct {
                 // 1 == TextDocumentSyncKind.Full.
@@ -108,6 +195,7 @@ pub const Server = struct {
                 documentSymbolProvider: bool = true,
                 workspaceSymbolProvider: bool = true,
                 completionProvider: struct {} = .{},
+                documentFormattingProvider: bool = true,
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
@@ -121,6 +209,16 @@ pub const Server = struct {
     fn handleInitialized(self: *Server, msg: jsonrpc.Message) void {
         _ = msg;
         if (self.phase == .initializing) self.phase = .running;
+    }
+
+    fn handleDidChangeConfiguration(self: *Server, msg: jsonrpc.Message) void {
+        const Params = struct { settings: std.json.Value = .null };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch |err| {
+            std.log.err("ignoring malformed workspace/didChangeConfiguration params: {t}", .{err});
+            return;
+        };
+        defer parsed.deinit();
+        self.applyOptions(parsed.value.settings);
     }
 
     fn handleShutdown(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
@@ -503,13 +601,70 @@ pub const Server = struct {
 
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, items.items);
     }
+
+    /// The last line/character of `text`, byte-based like the rest of
+    /// this server's position handling — used to build a
+    /// whole-document-replacing `TextEdit` range.
+    fn endOfDocument(text: []const u8) struct { u32, u32 } {
+        var line: u32 = 0;
+        var line_start: usize = 0;
+        for (text, 0..) |c, i| {
+            if (c == '\n') {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        return .{ line, @intCast(text.len - line_start) };
+    }
+
+    fn handleFormatting(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct { textDocument: struct { uri: []const u8 } };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/formatting params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+
+        var result = formatting.format(self.gpa, self.io, self.formatter_config, doc.text) catch |err| {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .internal_error, @errorName(err));
+            return;
+        };
+        defer result.deinit(self.gpa);
+
+        switch (result) {
+            .failure => |message| {
+                try jsonrpc.writeError(writer, self.gpa, msg.id.?, .internal_error, message);
+            },
+            .formatted => |text| {
+                // Full-document replace: simplest always-correct edit,
+                // and matches this server's full-document sync (no
+                // finer-grained diffing needed to compute it).
+                const end_line, const end_character = endOfDocument(doc.text);
+                const TextEditResult = struct { range: Range, newText: []const u8 };
+                const edits = [_]TextEditResult{.{
+                    .range = .{
+                        .start = .{ .line = 0, .character = 0 },
+                        .end = .{ .line = end_line, .character = end_character },
+                    },
+                    .newText = text,
+                }};
+                try jsonrpc.writeResult(writer, self.gpa, msg.id.?, &edits);
+            },
+        }
+    }
 };
 
 const harness = @import("protocol/harness.zig");
 
 test "full handshake: initialize, initialized, shutdown, exit" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var responses = try harness.run(gpa, &server, &.{
@@ -540,7 +695,7 @@ test "full handshake: initialize, initialized, shutdown, exit" {
 
 test "exit without shutdown reports a non-zero exit code" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var responses = try harness.run(gpa, &server, &.{
@@ -556,7 +711,7 @@ test "exit without shutdown reports a non-zero exit code" {
 
 test "requests before initialize are rejected with ServerNotInitialized" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var responses = try harness.run(gpa, &server, &.{
@@ -572,7 +727,7 @@ test "requests before initialize are rejected with ServerNotInitialized" {
 
 test "unknown method after initialize gets MethodNotFound" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var responses = try harness.run(gpa, &server, &.{
@@ -590,7 +745,7 @@ test "unknown method after initialize gets MethodNotFound" {
 
 test "didOpen tracks the document; didChange replaces its text and bumps its revision" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -621,7 +776,7 @@ test "didOpen tracks the document; didChange replaces its text and bumps its rev
 
 test "didChange on an unrelated file does not disturb another file's revision" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var responses = try harness.run(gpa, &server, &.{
@@ -643,7 +798,7 @@ test "didChange on an unrelated file does not disturb another file's revision" {
 
 test "didClose stops tracking the document" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -667,7 +822,7 @@ test "didClose stops tracking the document" {
 
 test "opening a file with a syntax error publishes a non-empty diagnostic (the Phase 3 milestone)" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -692,7 +847,7 @@ test "editing an unrelated file does not reparse or republish for this one" {
     // at the query layer: didChange on file B must not touch file A's
     // cached parse result.
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -715,7 +870,7 @@ test "editing an unrelated file does not reparse or republish for this one" {
 
 test "textDocument/definition resolves a top-level function reference" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -741,7 +896,7 @@ test "textDocument/definition resolves a top-level function reference" {
 
 test "textDocument/definition returns null when nothing resolves" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -761,7 +916,7 @@ test "textDocument/definition returns null when nothing resolves" {
 
 test "textDocument/definition follows an @import to resolve a cross-file reference" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -797,7 +952,7 @@ test "editing an imported file's function body does not recompute the importer's
     // resolving it below. Editing A's function body — not its signature —
     // must not touch anything cached for B.
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -851,7 +1006,7 @@ test "editing an imported file's function body does not recompute the importer's
 
 test "publishDiagnostics includes semantic diagnostics for syntactically valid files" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -879,7 +1034,7 @@ test "publishDiagnostics includes semantic diagnostics for syntactically valid f
 
 test "semantic diagnostics are skipped when the file has a syntax error" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -899,7 +1054,7 @@ test "semantic diagnostics are skipped when the file has a syntax error" {
 
 test "textDocument/hover returns a function's signature" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -920,7 +1075,7 @@ test "textDocument/hover returns a function's signature" {
 
 test "textDocument/documentSymbol lists top-level declarations" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -945,7 +1100,7 @@ test "textDocument/documentSymbol lists top-level declarations" {
 
 test "workspace/symbol searches across all open files" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -970,7 +1125,7 @@ test "workspace/symbol searches across all open files" {
 
 test "textDocument/completion offers keywords, top-level items, and in-scope locals" {
     const gpa = std.testing.allocator;
-    var server: Server = .init(gpa);
+    var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
@@ -999,4 +1154,82 @@ test "textDocument/completion offers keywords, top-level items, and in-scope loc
     try std.testing.expect(saw_keyword);
     try std.testing.expect(saw_top_level);
     try std.testing.expect(saw_local);
+}
+
+test "textDocument/formatting formats via the default zig fmt --stdin" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"const x=1;"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///a.zig"},"options":{"tabSize":4,"insertSpaces":true}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const edits = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), edits.len);
+    try std.testing.expectEqualStrings("const x = 1;\n", edits[0].object.get("newText").?.string);
+}
+
+test "textDocument/formatting reports an error for unformattable source" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"const x = ;"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///a.zig"},"options":{"tabSize":4,"insertSpaces":true}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.contains("error"));
+}
+
+test "initializationOptions can override the formatter command and args" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    // "cmd" here isn't real, but exercises that the override actually
+    // takes effect: the default `zig fmt --stdin` would succeed on this
+    // valid source, so if the override wasn't applied this'd format
+    // cleanly instead of failing to launch.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"initializationOptions":{"formatter":{"command":"this-formatter-does-not-exist-anywhere","args":[]}}}}
+    });
+    defer responses.deinit();
+
+    try std.testing.expectEqualStrings("this-formatter-does-not-exist-anywhere", server.formatter_config.command);
+    try std.testing.expectEqual(@as(usize, 0), server.formatter_config.args.len);
+    try std.testing.expect(server.formatter_config_owned);
+}
+
+test "workspace/didChangeConfiguration updates the formatter live" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    try std.testing.expectEqualStrings("zig", server.formatter_config.command);
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{"settings":{"formatter":{"command":"my-custom-formatter","args":["--stdin-mode"]}}}}
+    });
+    defer responses.deinit();
+
+    try std.testing.expectEqualStrings("my-custom-formatter", server.formatter_config.command);
+    try std.testing.expectEqual(@as(usize, 1), server.formatter_config.args.len);
+    try std.testing.expectEqualStrings("--stdin-mode", server.formatter_config.args[0]);
 }
