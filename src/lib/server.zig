@@ -432,11 +432,29 @@ pub const Server = struct {
         const value = if (doctest) |dt|
             try std.fmt.allocPrint(
                 self.gpa,
-                "```zig\n{s}\n```\n\n---\n\n**Example**\n```zig\n{s}\n```",
+                \\```zig
+                \\{s}
+                \\```
+                \\
+                \\---
+                \\
+                \\## Doctest Example
+                \\
+                \\```zig
+                \\{s}
+                \\```
+            ,
                 .{ any.def.signature, dt },
             )
         else
-            try std.fmt.allocPrint(self.gpa, "```zig\n{s}\n```", .{any.def.signature});
+            try std.fmt.allocPrint(
+                self.gpa,
+                \\```zig
+                \\{s}
+                \\```
+            ,
+                .{any.def.signature},
+            );
         defer self.gpa.free(value);
 
         const HoverContents = struct { kind: []const u8 = "markdown", value: []const u8 };

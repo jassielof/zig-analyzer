@@ -9,10 +9,12 @@
       "name": "Zig Analyzer",
       "type": "extensionHost",
       "request": "launch",
-      "args": ["--extensionDevelopmentPath=${workspaceFolder}/vscode"],
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder:VSCode Extension}",
+      ],
       "preLaunchTask": "build zig-analyzer",
       "env": {
-        "PATH": "${workspaceFolder}/zig-out/bin;${env:PATH}"
+        "PATH": "${workspaceFolder:LSP}/zig-out/bin;${env:PATH}"
       }
     }
   ]

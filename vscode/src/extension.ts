@@ -1,5 +1,8 @@
 // Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) rather than auto-downloaded/managed; see project plan §5.
 
+// TODO: There should be code lenses above each build step declaration in the build system script (build.zig) to run that step, as well as a code lens above the build() function to simply build it as `zig build`, for the main entry point too, but in this case currently just as `zig run <file.zig>` (where the file.zig is that file with the main() function)
+// TODO: On the manfiest dependencies (build.zig.zon), it should be able to fetch the version of the dependency and show it, this mainly for path-based dependencies, url-based ones are excluded as needs more work at the moment.
+
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
