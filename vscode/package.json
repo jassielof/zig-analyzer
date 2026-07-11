@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "package": "node esbuild.js --production && vsce package --no-dependencies"
+    "vscode:prepublish": "node esbuild.js --production",
+    "package": "vsce package --no-dependencies"
   },
   "repository": {
     "type": "git",
@@ -31,10 +32,11 @@
     "theme": "dark",
     "color": "#000000"
   },
-  "icon": "assets/zig-mark.png",
+  "icon": "assets/images/icon.png",
   "private": true,
   "activationEvents": [
-    "onLanguage:zig"
+    "onLanguage:zig",
+    "onLanguage:zon"
   ],
   "keywords": [
     "zig",
