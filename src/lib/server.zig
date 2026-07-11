@@ -7,6 +7,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Ast = std.zig.Ast;
+const build_options = @import("build_options");
 const jsonrpc = @import("protocol/jsonrpc.zig");
 const documents = @import("documents.zig");
 const parse = @import("analysis/queries/parse.zig");
@@ -110,7 +111,7 @@ pub const Server = struct {
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
-                version: []const u8 = "0.0.0",
+                version: []const u8 = build_options.version,
             } = .{},
         };
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, InitializeResult{});

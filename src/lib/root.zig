@@ -14,11 +14,11 @@
 // }
 // ```
 // The function addOne() should be able to also show the test as part of its documentation, under a "Doctests" or "Examples" (prefereably, as doctest is internal targeted, not external) section.
+pub const build_options = @import("build_options");
 pub const analysis = @import("analysis.zig");
 pub const protocol = @import("protocol.zig");
 pub const server = @import("server.zig");
 pub const documents = @import("documents.zig");
-pub const invalidation_test = @import("invalidation_test.zig");
 
 comptime {
     @import("std").testing.refAllDecls(@This());

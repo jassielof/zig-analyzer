@@ -1,4 +1,5 @@
 const std = @import("std");
+const project = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const mod_name = "zig_analyzer";
@@ -11,6 +12,13 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/lib/root.zig"),
         .target = target,
     });
+
+    // Single source of truth for the version string: build.zig.zon.
+    // `--version` and the LSP `serverInfo.version` both read this instead
+    // of maintaining their own copy that could drift.
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", project.version);
+    mod.addOptions("build_options", options);
 
     const run_step = b.step("cli", "Test the CLI");
 

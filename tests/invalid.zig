@@ -7,16 +7,16 @@
 //! read `Cache.misses` — the number of times a query actually ran its
 //! `compute` function — after each scripted step.
 //!
-//! Uses the same in-process `protocol.harness` every other phase's
-//! integration tests use, driving a real `Server` through real framed
-//! JSON-RPC messages — no shortcuts that call internal APIs the wire
+//! An integration test against the public `zig_analyzer` module API (not
+//! internal file paths), driving a real `Server` through the same
+//! `protocol.harness` every other integration test uses — real framed
+//! JSON-RPC messages, no shortcuts that call internal APIs the wire
 //! protocol wouldn't actually exercise.
-// TODO: This should be moved as integration tests under tests/invalid.zig and imported in tests/suite.zig.
 
 const std = @import("std");
-const server_mod = @import("server.zig");
-const Server = server_mod.Server;
-const harness = @import("protocol/harness.zig");
+const zig_analyzer = @import("zig_analyzer");
+const Server = zig_analyzer.server.Server;
+const harness = zig_analyzer.protocol.harness;
 
 const testing = std.testing;
 
