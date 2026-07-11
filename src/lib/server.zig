@@ -16,6 +16,7 @@ const resolve = @import("analysis/queries/resolve.zig");
 const imports = @import("analysis/queries/imports.zig");
 const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
 const formatting = @import("formatting.zig");
+const semantic_tokens = @import("analysis/queries/semantic_tokens.zig");
 
 /// Where the server is in the LSP lifecycle state machine (see the LSP spec's
 /// "Basic JSON Structures" / lifecycle section). Method handling depends on
@@ -163,6 +164,8 @@ pub const Server = struct {
             try self.handleFormatting(writer, msg);
         } else if (std.mem.eql(u8, msg.method, "workspace/didChangeConfiguration")) {
             self.handleDidChangeConfiguration(msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/semanticTokens/full")) {
+            try self.handleSemanticTokensFull(writer, msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -196,6 +199,17 @@ pub const Server = struct {
                 workspaceSymbolProvider: bool = true,
                 completionProvider: struct {} = .{},
                 documentFormattingProvider: bool = true,
+                semanticTokensProvider: struct {
+                    legend: struct {
+                        // Order is significant: it's the index each
+                        // semantic_tokens.TokenType/TokenModifier variant
+                        // encodes to on the wire. Must match that enum's
+                        // declaration order exactly.
+                        tokenTypes: []const []const u8 = &.{ "function", "parameter", "variable" },
+                        tokenModifiers: []const []const u8 = &.{ "declaration", "readonly" },
+                    } = .{},
+                    full: bool = true,
+                } = .{},
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
@@ -657,6 +671,32 @@ pub const Server = struct {
                 try jsonrpc.writeResult(writer, self.gpa, msg.id.?, &edits);
             },
         }
+    }
+
+    fn handleSemanticTokensFull(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct { textDocument: struct { uri: []const u8 } };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/semanticTokens/full params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+
+        const tokens = try semantic_tokens.collect(self.gpa, parsed_file.ast);
+        defer self.gpa.free(tokens);
+
+        const data = try semantic_tokens.encode(self.gpa, tokens);
+        defer self.gpa.free(data);
+
+        const SemanticTokensResult = struct { data: []const u32 };
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, SemanticTokensResult{ .data = data });
     }
 };
 
@@ -1232,4 +1272,43 @@ test "workspace/didChangeConfiguration updates the formatter live" {
     try std.testing.expectEqualStrings("my-custom-formatter", server.formatter_config.command);
     try std.testing.expectEqual(@as(usize, 1), server.formatter_config.args.len);
     try std.testing.expectEqualStrings("--stdin-mode", server.formatter_config.args[0]);
+}
+
+test "textDocument/semanticTokens/full advertises a legend and returns delta-encoded data" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var init_responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+    });
+    defer init_responses.deinit();
+    var init_parsed = try std.json.parseFromSlice(std.json.Value, gpa, init_responses.messages.items[0], .{});
+    defer init_parsed.deinit();
+    const legend = init_parsed.value.object.get("result").?.object.get("capabilities").?.object
+        .get("semanticTokensProvider").?.object.get("legend").?.object;
+    try std.testing.expectEqual(@as(usize, 3), legend.get("tokenTypes").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 2), legend.get("tokenModifiers").?.array.items.len);
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/semanticTokens/full","params":{"textDocument":{"uri":"file:///a.zig"}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const data = parsed.value.object.get("result").?.object.get("data").?.array.items;
+    // 3 tokens (fn name + 2 params) * 5 u32s each.
+    try std.testing.expectEqual(@as(usize, 15), data.len);
+    // First token: function "add" at line 0, character 3, length 3, type 0 (function), modifier bit 0 (declaration).
+    try std.testing.expectEqual(@as(i64, 0), data[0].integer);
+    try std.testing.expectEqual(@as(i64, 3), data[1].integer);
+    try std.testing.expectEqual(@as(i64, 3), data[2].integer);
+    try std.testing.expectEqual(@as(i64, 0), data[3].integer);
+    try std.testing.expectEqual(@as(i64, 1), data[4].integer);
 }

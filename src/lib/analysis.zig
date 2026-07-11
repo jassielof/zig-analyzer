@@ -5,4 +5,5 @@ pub const queries = struct {
     pub const resolve = @import("analysis/queries/resolve.zig");
     pub const imports = @import("analysis/queries/imports.zig");
     pub const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
+    pub const semantic_tokens = @import("analysis/queries/semantic_tokens.zig");
 };
