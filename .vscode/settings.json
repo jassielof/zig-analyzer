@@ -1,4 +1,4 @@
 {
   "git.repositoryScanIgnoredFolders": ["references"],
-  "git.detectSubmodules": false
+  "git.detectSubmodules": false,
 }

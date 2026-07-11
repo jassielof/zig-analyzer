@@ -1,0 +1,16 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build zig-analyzer",
+      "type": "process",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "command": "zig",
+      "args": ["build"],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}
