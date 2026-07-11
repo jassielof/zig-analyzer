@@ -1,0 +1,42 @@
+name: LSP CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "modules/**"
+      - "tests/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/lsp.yaml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "modules/**"
+      - "tests/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/lsp.yaml"
+
+concurrency:
+  group: lsp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: false
+      - name: Setup Zig
+        uses: jassielof/setup-zig@main
+      - name: Run tests
+        run: zig build test --summary all
