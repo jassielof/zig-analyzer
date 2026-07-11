@@ -52,6 +52,12 @@ pub fn Cache(comptime Key: type, comptime Value: type, comptime Context: type) t
         const Map = std.HashMapUnmanaged(Key, Entry, Context, std.hash_map.default_max_load_percentage);
 
         map: Map = .empty,
+        /// Number of times `getOrCompute` has actually invoked `compute`
+        /// (as opposed to serving a cached value). Exists so tests can
+        /// assert *which* queries recomputed after a scripted edit
+        /// sequence, not just that the final output is correct — see
+        /// Phase 9 in the project plan.
+        misses: usize = 0,
 
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
             self.map.deinit(gpa);
@@ -80,6 +86,7 @@ pub fn Cache(comptime Key: type, comptime Value: type, comptime Context: type) t
             comptime compute: fn (@TypeOf(ctx)) Value,
         ) !Value {
             if (self.peek(key, revision)) |cached| return cached;
+            self.misses += 1;
             const value = compute(ctx);
             try self.map.put(gpa, key, .{ .value = value, .revision = revision });
             return value;
@@ -123,6 +130,8 @@ pub fn OwningStringCache(comptime Value: type, comptime deinitValue: fn (*Value,
         };
 
         map: std.StringHashMapUnmanaged(Entry) = .empty,
+        /// See `Cache.misses`.
+        misses: usize = 0,
 
         pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
             var it = self.map.iterator();
@@ -156,6 +165,7 @@ pub fn OwningStringCache(comptime Value: type, comptime deinitValue: fn (*Value,
             comptime compute: fn (@TypeOf(ctx)) anyerror!Value,
         ) !*Value {
             if (self.peek(key, revision)) |cached| return cached;
+            self.misses += 1;
 
             var value = try compute(ctx);
             errdefer deinitValue(&value, gpa);

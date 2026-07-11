@@ -19,6 +19,7 @@ pub const protocol = struct {
 
 pub const server = @import("server.zig");
 pub const documents = @import("documents.zig");
+const invalidation_test = @import("invalidation_test.zig");
 
 test {
     _ = analysis.query;
@@ -32,4 +33,5 @@ test {
     _ = protocol.harness;
     _ = server;
     _ = documents;
+    _ = invalidation_test;
 }
