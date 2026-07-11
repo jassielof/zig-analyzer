@@ -1,4 +1,4 @@
-name: LSP CI
+name: Zig Analyzer LSP CI
 
 on:
   push:
