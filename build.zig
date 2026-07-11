@@ -1,31 +1,29 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const mod_name = "zig_analyzer";
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule(mod_name, .{
+    const mod = b.addModule("zig_analyzer", .{
         .root_source_file = b.path("src/lib/root.zig"),
         .target = target,
     });
 
     const exe = b.addExecutable(.{
-        .name = mod_name,
+        .name = "zig-analyzer",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = mod_name, .module = mod },
+                .{ .name = "zig_analyzer", .module = mod },
             },
         }),
     });
 
     b.installArtifact(exe);
 
-    const run_step = b.step("run", "Run the app");
+    const run_step = b.step("cli", "Test the CLI");
 
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
