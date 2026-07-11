@@ -85,7 +85,14 @@
         "zigAnalyzer.serverPath": {
           "type": "string",
           "default": "",
+          "scope": "machine-overridable",
           "description": "Path to the zig-analyzer executable. If empty, the extension won't start the language server."
+        },
+        "zigAnalyzer.zigPath": {
+          "type": "string",
+          "default": "zig",
+          "scope": "machine-overridable",
+          "description": "Path to the zig executable, used by \"Zig Analyzer: Run Build Step\" to list and run build.zig steps."
         },
         "zigAnalyzer.trace.server": {
           "type": "string",
@@ -103,8 +110,22 @@
       {
         "command": "zigAnalyzer.restart",
         "title": "Zig Analyzer: Restart Language Server"
+      },
+      {
+        "command": "zigAnalyzer.runBuildStep",
+        "title": "Zig Analyzer: Run Build Step"
       }
     ]
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Executable paths (zigAnalyzer.serverPath, zigAnalyzer.zigPath) are ignored in untrusted workspaces to prevent a workspace from silently configuring code execution.",
+      "restrictedConfigurations": [
+        "zigAnalyzer.serverPath",
+        "zigAnalyzer.zigPath"
+      ]
+    }
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.0"
