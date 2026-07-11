@@ -1,18 +1,27 @@
-//! By convention, root.zig is the root source file when making a package.
-const std = @import("std");
-const Io = std.Io;
+//! Public module root for zig-analyzer's analysis core.
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+pub const analysis = struct {
+    pub const query = @import("analysis/query.zig");
+    pub const queries = struct {
+        pub const parse = @import("analysis/queries/parse.zig");
+    };
+};
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+pub const protocol = struct {
+    pub const framing = @import("protocol/framing.zig");
+    pub const jsonrpc = @import("protocol/jsonrpc.zig");
+    pub const harness = @import("protocol/harness.zig");
+};
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+pub const server = @import("server.zig");
+pub const documents = @import("documents.zig");
+
+test {
+    _ = analysis.query;
+    _ = analysis.queries.parse;
+    _ = protocol.framing;
+    _ = protocol.jsonrpc;
+    _ = protocol.harness;
+    _ = server;
+    _ = documents;
 }
