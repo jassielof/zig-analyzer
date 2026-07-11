@@ -1,34 +1,69 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "ZON",
+  "scopeName": "source.zon",
+  "comment": "ZON (Zig Object Notation) is a data format, not a programming language — it has no control flow, no function calls, no operators beyond unary minus. Its grammar is deliberately much smaller than zig.tmLanguage.json's; don't add Zig-the-language constructs here.",
   "patterns": [
-    {
-      "include": "#keywords"
-    },
-    {
-      "include": "#strings"
-    }
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#literals" },
+    { "include": "#field-name" },
+    { "include": "#enum-literal" }
   ],
   "repository": {
-    "keywords": {
+    "comments": {
+      "name": "comment.line.double-slash.zon",
+      "match": "//.*$"
+    },
+    "strings": {
       "patterns": [
         {
-          "name": "keyword.control.zon",
-          "match": "\\b(if|while|for|return)\\b"
+          "name": "string.quoted.double.zon",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#string-escape" }]
+        },
+        {
+          "name": "string.quoted.other.multiline.zon",
+          "match": "\\\\\\\\.*$"
         }
       ]
     },
-    "strings": {
-      "name": "string.quoted.double.zon",
-      "begin": "\"",
-      "end": "\"",
+    "string-escape": {
+      "name": "constant.character.escape.zon",
+      "match": "\\\\(x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|n|r|t|\\\\|'|\"|0)"
+    },
+    "numbers": {
       "patterns": [
         {
-          "name": "constant.character.escape.zig",
-          "match": "\\\\."
-        }
+          "name": "constant.numeric.hex.zon",
+          "match": "-?\\b0x[0-9a-fA-F_]+(\\.[0-9a-fA-F_]+)?([pP][+-]?[0-9_]+)?\\b"
+        },
+        { "name": "constant.numeric.octal.zon", "match": "-?\\b0o[0-7_]+\\b" },
+        { "name": "constant.numeric.binary.zon", "match": "-?\\b0b[01_]+\\b" },
+        {
+          "name": "constant.numeric.float.zon",
+          "match": "-?\\b[0-9][0-9_]*\\.[0-9_]+([eE][+-]?[0-9_]+)?\\b"
+        },
+        { "name": "constant.numeric.decimal.zon", "match": "-?\\b[0-9][0-9_]*\\b" }
       ]
+    },
+    "literals": {
+      "name": "constant.language.zon",
+      "match": "\\b(true|false|null)\\b"
+    },
+    "field-name": {
+      "comment": "`.name = value` — a struct field initializer.",
+      "match": "\\.([A-Za-z_]\\w*)\\s*(?==)",
+      "captures": {
+        "1": { "name": "variable.other.member.zon" }
+      }
+    },
+    "enum-literal": {
+      "comment": "`.name` not followed by `=` — an enum-literal value, e.g. `.debug` in `.optimize = .debug`.",
+      "name": "constant.other.enum.zon",
+      "match": "\\.[A-Za-z_]\\w*"
     }
-  },
-  "scopeName": "source.zig"
+  }
 }

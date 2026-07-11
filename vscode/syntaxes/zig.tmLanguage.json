@@ -1,32 +1,115 @@
 {
-	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-	"name": "Zig",
-	"patterns": [
-		{
-			"include": "#keywords"
-		},
-		{
-			"include": "#strings"
-		}
-	],
-	"repository": {
-		"keywords": {
-			"patterns": [{
-				"name": "keyword.control.zig",
-				"match": "\\b(if|while|for|return)\\b"
-			}]
-		},
-		"strings": {
-			"name": "string.quoted.double.zig",
-			"begin": "\"",
-			"end": "\"",
-			"patterns": [
-				{
-					"name": "constant.character.escape.zig",
-					"match": "\\\\."
-				}
-			]
-		}
-	},
-	"scopeName": "source.zig"
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Zig",
+  "scopeName": "source.zig",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#builtins" },
+    { "include": "#function-declaration" },
+    { "include": "#keywords" },
+    { "include": "#function-calls" },
+    { "include": "#types" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.banner.zig", "match": "//!.*$" },
+        { "name": "comment.line.documentation.zig", "match": "///.*$" },
+        { "name": "comment.line.double-slash.zig", "match": "//.*$" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.zig",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#string-escape" }]
+        },
+        {
+          "name": "string.quoted.single.zig",
+          "begin": "'",
+          "end": "'",
+          "patterns": [{ "include": "#string-escape" }]
+        },
+        {
+          "name": "string.quoted.other.multiline.zig",
+          "match": "\\\\\\\\.*$"
+        }
+      ]
+    },
+    "string-escape": {
+      "name": "constant.character.escape.zig",
+      "match": "\\\\(x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\}|n|r|t|\\\\|'|\"|0)"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.zig",
+          "match": "\\b0x[0-9a-fA-F_]+(\\.[0-9a-fA-F_]+)?([pP][+-]?[0-9_]+)?\\b"
+        },
+        { "name": "constant.numeric.octal.zig", "match": "\\b0o[0-7_]+\\b" },
+        { "name": "constant.numeric.binary.zig", "match": "\\b0b[01_]+\\b" },
+        {
+          "name": "constant.numeric.float.zig",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]+([eE][+-]?[0-9_]+)?\\b"
+        },
+        { "name": "constant.numeric.decimal.zig", "match": "\\b[0-9][0-9_]*\\b" }
+      ]
+    },
+    "builtins": {
+      "name": "support.function.builtin.zig",
+      "match": "@[A-Za-z_]\\w*"
+    },
+    "function-declaration": {
+      "match": "\\b(fn)\\s+([A-Za-z_]\\w*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.zig" },
+        "2": { "name": "entity.name.function.zig" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.zig",
+          "match": "\\b(if|else|while|for|switch|break|continue|return|defer|errdefer|try|catch|orelse|unreachable)\\b"
+        },
+        {
+          "name": "keyword.declaration.zig",
+          "match": "\\b(const|var|fn|pub|struct|enum|union|error|opaque|test|usingnamespace)\\b"
+        },
+        {
+          "name": "storage.modifier.zig",
+          "match": "\\b(comptime|inline|noinline|export|extern|packed|align|volatile|allowzero|threadlocal|linksection|noalias|async|await|suspend|nosuspend|resume)\\b"
+        },
+        {
+          "name": "constant.language.zig",
+          "match": "\\b(true|false|null|undefined)\\b"
+        },
+        {
+          "name": "storage.type.zig",
+          "match": "\\b(anytype|anyframe|anyerror|anyopaque|type|noreturn|void|bool|comptime_int|comptime_float|isize|usize|c_char|c_short|c_ushort|c_int|c_uint|c_long|c_ulong|c_longlong|c_ulonglong|c_longdouble|f16|f32|f64|f80|f128)\\b"
+        },
+        {
+          "name": "storage.type.numeric.zig",
+          "match": "\\b[iu][0-9]+\\b"
+        }
+      ]
+    },
+    "function-calls": {
+      "match": "\\b([a-z_]\\w*)\\s*(?=\\()",
+      "name": "entity.name.function.zig"
+    },
+    "types": {
+      "match": "\\b[A-Z]\\w*\\b",
+      "name": "entity.name.type.zig"
+    },
+    "operators": {
+      "name": "keyword.operator.zig",
+      "match": "\\+\\+|--|=>|==|!=|<=|>=|&&|\\|\\||<<|>>|\\.\\.\\.|\\.\\.|[+\\-*/%=<>!&|^~?.]"
+    }
+  }
 }

@@ -1,17 +1,29 @@
 {
   "comments": {
-    // symbol used for single line comment. Remove this entry if your language does not support line comments
-    "lineComment": {
-      "comment": "//"
-    }
+    // Zig has no block comments (`/* */`), only line comments.
+    "lineComment": "//"
   },
-  // symbols used as brackets
+  // Continues `///` doc comments and `//!` top-level doc comments onto
+  // the next line automatically, matching how most language configs
+  // that support doc comments behave.
+  "onEnterRules": [
+    {
+      "beforeText": "^\\s*///.*$",
+      "action": { "indentAction": "None", "appendText": "/// " }
+    },
+    {
+      "beforeText": "^\\s*//!.*$",
+      "action": { "indentAction": "None", "appendText": "//! " }
+    }
+  ],
+  // `@` is included so builtins (`@import`, `@TypeOf`, ...) are treated
+  // as one word for double-click selection and word-based navigation.
+  "wordPattern": "(-?\\d*\\.\\d\\w*)|([@$]?[A-Za-z_]\\w*)",
   "brackets": [
     ["{", "}"],
     ["[", "]"],
     ["(", ")"]
   ],
-  // symbols that are auto closed when typing
   "autoClosingPairs": [
     ["{", "}"],
     ["[", "]"],
@@ -19,7 +31,6 @@
     ["\"", "\""],
     ["'", "'"]
   ],
-  // symbols that can be used to surround a selection
   "surroundingPairs": [
     ["{", "}"],
     ["[", "]"],

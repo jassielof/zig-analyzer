@@ -59,13 +59,22 @@
       {
         "id": "zig",
         "extensions": [
-          ".zig",
-          ".zon"
+          ".zig"
         ],
         "aliases": [
           "Zig",
-          "zig",
-          "ZON"
+          "zig"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "zon",
+        "extensions": [
+          ".zon"
+        ],
+        "aliases": [
+          "ZON",
+          "zon"
         ],
         "configuration": "./language-configuration.json"
       }
@@ -75,6 +84,11 @@
         "language": "zig",
         "scopeName": "source.zig",
         "path": "./syntaxes/zig.tmLanguage.json"
+      },
+      {
+        "language": "zon",
+        "scopeName": "source.zon",
+        "path": "./syntaxes/zon.tmLanguage.json"
       }
     ],
     "configuration": {
