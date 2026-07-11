@@ -32,9 +32,7 @@ pub fn build(b: *std.Build) void {
 
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (b.args) |args| run_cmd.addArgs(args);
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
@@ -48,7 +46,7 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
-    const test_step = b.step("test", "Run tests");
+    const test_step = b.step("test", "Run the test suite");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
