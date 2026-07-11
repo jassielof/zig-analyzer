@@ -388,10 +388,13 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
-        const any = try self.resolveRequestPosition(parsed.value.textDocument.uri, parsed.value.position) orelse {
+        const initial = try self.resolveRequestPosition(parsed.value.textDocument.uri, parsed.value.position) orelse {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
         };
+        defer self.gpa.free(initial.uri);
+
+        const any = try self.redirectImportBinding(initial.uri, initial.def);
         defer self.gpa.free(any.uri);
 
         const LocationResult = struct { uri: []const u8, range: Range };
@@ -402,6 +405,34 @@ pub const Server = struct {
                 .end = .{ .line = any.def.line, .character = any.def.end_character },
             },
         });
+    }
+
+    /// If `def` (already resolved, in the file at `uri`) is itself a
+    /// top-level import binding (`const helpers = @import("helpers.zig");`),
+    /// returns a `Definition` redirected to the start of the imported file
+    /// instead of the local `const` line — matches how most editors treat
+    /// go-to-definition on a module/namespace identifier. The imported
+    /// file doesn't need to be open/tracked for this: unlike
+    /// `resolveCrossFile` (which needs the target's content to resolve a
+    /// specific member), this only needs its URI. Otherwise returns `def`
+    /// unchanged. Always returns an owned `uri`, matching
+    /// `resolveRequestPosition`'s contract.
+    fn redirectImportBinding(self: *Server, uri: []const u8, def: resolve.Definition) !AnyDefinition {
+        const doc = self.documents.get(uri) orelse return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const decl_name = nameOfDefinition(parsed_file.ast, def);
+
+        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri);
+        defer imports.freeImports(self.gpa, imports_list);
+        for (imports_list) |imp| {
+            if (!std.mem.eql(u8, imp.name, decl_name)) continue;
+            const target_uri = imp.uri orelse break;
+            return .{
+                .uri = try self.gpa.dupe(u8, target_uri),
+                .def = .{ .line = 0, .character = 0, .end_character = 0, .signature = def.signature },
+            };
+        }
+        return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
     }
 
     /// `resolve.findDoctest` returns the raw `{ ... }` block source —
@@ -1286,6 +1317,60 @@ test "textDocument/definition follows an @import to resolve a cross-file referen
     const range = result.get("range").?.object;
     try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
     try std.testing.expectEqual(@as(i64, 7), range.get("start").?.object.get("character").?.integer);
+}
+
+test "textDocument/definition on an import binding's declaration redirects to the imported file" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/helpers.zig","text":"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const helpers = @import(\"helpers.zig\");\nfn main() void {\n    _ = helpers.add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    // "helpers" in "const helpers = @import(...)" itself, at character 6.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":8}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("file:///proj/helpers.zig", result.get("uri").?.string);
+    try std.testing.expectEqual(@as(i64, 0), result.get("range").?.object.get("start").?.object.get("line").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), result.get("range").?.object.get("start").?.object.get("character").?.integer);
+}
+
+test "textDocument/definition on a later use of an import binding also redirects to the imported file" {
+    // The FIXME this resolves: previously this landed on the local
+    // `const helpers = @import(...)` line, not the file itself — correct
+    // in the narrow sense that's where `helpers` is declared, but not
+    // what "go to definition" on a module identifier should do.
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/helpers.zig","text":"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const helpers = @import(\"helpers.zig\");\nfn main() void {\n    _ = helpers.add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    // "helpers" in "helpers.add(1, 2)" (not "add" itself), at character 10.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":2,"character":10}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("file:///proj/helpers.zig", result.get("uri").?.string);
 }
 
 test "editing an imported file's function body does not recompute the importer's cache (the Phase 6 milestone)" {
