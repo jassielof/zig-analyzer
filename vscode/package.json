@@ -5,6 +5,9 @@
   "categories": [
     "Programming Languages"
   ],
+  "bugs": {
+    "url": "https://github.com/jassielof/zig-analyzer/issues"
+  },
   "readme": "README.adoc",
   "version": "0.1.0",
   "description": "Zig Analyzer provides language server support for the Zig programming language.",
@@ -20,10 +23,20 @@
   "engines": {
     "vscode": "^1.105.0"
   },
+  "homepage": "https://github.com/jassielof/zig-analyzer",
+  "galleryBanner": {
+    "theme": "dark",
+    "color": "#000000"
+  },
+  "private": true,
   "activationEvents": [
     "onLanguage:zig"
   ],
-  "keywords": [],
+  "keywords": [
+    "zig",
+    "language-server",
+    "lsp"
+  ],
   "author": "Jassiel Ovando",
   "license": "MPL-2.0",
   "devEngines": {
