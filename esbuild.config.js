@@ -7,11 +7,11 @@ const watch = process.argv.includes("--watch");
 
 async function main() {
   const ctx = await esbuild.context({
-    entryPoints: ["src/extension.ts"],
+    entryPoints: ["src/vscode/extension.ts"],
     bundle: true,
     format: "cjs",
     platform: "node",
-    target: "node20",
+    target: "node",
     outfile: "dist/extension.js",
     external: ["vscode"],
     sourcemap: !production,
