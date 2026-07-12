@@ -42,6 +42,13 @@ Whatever you configure is spawned directly (never through a shell), so shell met
 * **Zig Analyzer: Restart Language Server** — stops and restarts the language server, picking up a changed `zigAnalyzer.serverPath` without reloading the window.
 * **Zig Analyzer: Run Build Step** — lists the `build.zig` steps for the current project (via `zig build --list-steps`) and runs the one you pick as a VS Code task.
 
+## Code lenses
+
+When editing Zig files (with editor code lenses enabled):
+
+* In `build.zig`: a **zig build** lens above `fn build`, and a **zig build \<step\>** lens above each `b.step("…")`.
+* Above `fn main`: if `build.zig` wires that file as an executable root to a run step (the usual `b.step` → `addExecutable` → `addRunArtifact` → `dependOn` pattern), the lens runs **zig build \<step\>**. Otherwise it falls back to **zig run** on that file.
+
 ## Known Issues
 
 `zig-analyzer` is under active development. See the [project plan](https://github.com/jassielof/zig-analyzer) for what's implemented so far.

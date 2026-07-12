@@ -145,8 +145,28 @@
       {
         "command": "zigAnalyzer.runBuildStep",
         "title": "Zig Analyzer: Run Build Step"
+      },
+      {
+        "command": "zigAnalyzer.executeBuild",
+        "title": "Zig Analyzer: Execute Build"
+      },
+      {
+        "command": "zigAnalyzer.executeRunFile",
+        "title": "Zig Analyzer: Run Zig File"
       }
-    ]
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "zigAnalyzer.executeBuild",
+          "when": "false"
+        },
+        {
+          "command": "zigAnalyzer.executeRunFile",
+          "when": "false"
+        }
+      ]
+    }
   },
   "capabilities": {
     "untrustedWorkspaces": {

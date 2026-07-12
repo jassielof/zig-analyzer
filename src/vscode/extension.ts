@@ -1,7 +1,8 @@
 // Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) rather than auto-downloaded/managed; see project plan §5.
 
-// TODO: There should be code lenses above each build step declaration in the build system script (build.zig) to run that step, as well as a code lens above the build() function to simply build it as `zig build`, for the main entry point too, but in this case currently just as `zig run <file.zig>` (where the file.zig is that file with the main() function), this should be smart, if the current workspace is basically a zig project, it should track the respective file, for example, say i declare an executable module in the build script, with the module root, instead of being src/main.zig it's cmd/docent.zig, but docent.zig has the main() function, so the code lens should be able to track that and run it accordingly, as `zig build <STEP>` for the respective module executable, otherwise, attempt to fallback to simply `zig run <file.zig where the main() function exists>`.
 // TODO: On the manfiest dependencies (build.zig.zon), it should be able to fetch the version of the dependency and show it, this mainly for path-based dependencies, url-based ones are excluded as needs more work at the moment. Ideally, for URL/Git-based dependencies we could also achieve it, since these are also locally cached under the new `zig-pkg` cache dir.
+// TODO: Doc comments aren't being rendered on hover still, fix it, specially for stdlib, nor dependencies, check the references directory for other lsp implementations to learn and do better.
+// TODO: There are no inlay hints yet, at least exposed as configuration in vscode settings.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -12,16 +13,39 @@ import {
   type ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { ZigBuildCodeLensProvider } from "./buildCodeLenses";
 
 const execFileAsync = promisify(execFile);
 
 let client: LanguageClient | undefined;
+let codeLensProvider: ZigBuildCodeLensProvider | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  codeLensProvider = new ZigBuildCodeLensProvider();
+
   context.subscriptions.push(
+    codeLensProvider,
+    vscode.languages.registerCodeLensProvider(
+      [{ language: "zig", scheme: "file" }],
+      codeLensProvider,
+    ),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme === "file" && doc.uri.fsPath.endsWith("build.zig")) {
+        codeLensProvider?.refresh();
+      }
+    }),
     vscode.commands.registerCommand("zigAnalyzer.restart", () => restart()),
     vscode.commands.registerCommand("zigAnalyzer.runBuildStep", () =>
-      runBuildStep(),
+      runBuildStepPicker(),
+    ),
+    vscode.commands.registerCommand(
+      "zigAnalyzer.executeBuild",
+      (stepName: string | null, folderUri: string | null) =>
+        executeBuild(stepName, folderUri),
+    ),
+    vscode.commands.registerCommand(
+      "zigAnalyzer.executeRunFile",
+      (filePath: string) => executeRunFile(filePath),
     ),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (
@@ -179,10 +203,82 @@ async function findZigProjectFolder(): Promise<
   });
 }
 
-async function runBuildStep(): Promise<void> {
+function folderFromUriString(
+  folderUri: string | null | undefined,
+): vscode.WorkspaceFolder | undefined {
+  if (!folderUri) return undefined;
+  return vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(folderUri));
+}
+
+async function executeBuild(
+  stepName: string | null,
+  folderUri: string | null,
+): Promise<void> {
+  const folder =
+    folderFromUriString(folderUri) ?? (await findZigProjectFolder());
+  if (!folder) {
+    void vscode.window.showErrorMessage(
+      "Zig Analyzer: no workspace folder open.",
+    );
+    return;
+  }
+
+  const zigPath = getZigPath();
+  const args = stepName ? ["build", stepName] : ["build"];
+  const title = stepName ? `zig build ${stepName}` : "zig build";
+
+  const task = new vscode.Task(
+    { type: "zig-analyzer-build", step: stepName ?? "" },
+    folder,
+    title,
+    "zig-analyzer",
+    new vscode.ProcessExecution(zigPath, args, { cwd: folder.uri.fsPath }),
+    [],
+  );
+  task.presentationOptions = {
+    reveal: vscode.TaskRevealKind.Always,
+    panel: vscode.TaskPanelKind.Dedicated,
+    clear: true,
+  };
+  await vscode.tasks.executeTask(task);
+}
+
+async function executeRunFile(filePath: string): Promise<void> {
+  const uri = vscode.Uri.file(filePath);
+  const folder =
+    vscode.workspace.getWorkspaceFolder(uri) ?? (await findZigProjectFolder());
+  if (!folder) {
+    void vscode.window.showErrorMessage(
+      "Zig Analyzer: no workspace folder open.",
+    );
+    return;
+  }
+
+  const zigPath = getZigPath();
+  const task = new vscode.Task(
+    { type: "zig-analyzer-run", file: filePath },
+    folder,
+    `zig run ${filePath}`,
+    "zig-analyzer",
+    new vscode.ProcessExecution(zigPath, ["run", filePath], {
+      cwd: folder.uri.fsPath,
+    }),
+    [],
+  );
+  task.presentationOptions = {
+    reveal: vscode.TaskRevealKind.Always,
+    panel: vscode.TaskPanelKind.Dedicated,
+    clear: true,
+  };
+  await vscode.tasks.executeTask(task);
+}
+
+async function runBuildStepPicker(): Promise<void> {
   const folder = await findZigProjectFolder();
   if (!folder) {
-    void vscode.window.showErrorMessage("Zig Analyzer: no workspace folder open.");
+    void vscode.window.showErrorMessage(
+      "Zig Analyzer: no workspace folder open.",
+    );
     return;
   }
 
@@ -219,20 +315,5 @@ async function runBuildStep(): Promise<void> {
     return;
   }
 
-  const task = new vscode.Task(
-    { type: "zig-analyzer-build", step: picked.step.name },
-    folder,
-    `zig build ${picked.step.name}`,
-    "zig-analyzer",
-    new vscode.ProcessExecution(zigPath, ["build", picked.step.name], {
-      cwd: folder.uri.fsPath,
-    }),
-    [],
-  );
-  task.presentationOptions = {
-    reveal: vscode.TaskRevealKind.Always,
-    panel: vscode.TaskPanelKind.Dedicated,
-    clear: true,
-  };
-  await vscode.tasks.executeTask(task);
+  await executeBuild(picked.step.name, folder.uri.toString());
 }
