@@ -1,4 +1,8 @@
 {
   "git.repositoryScanIgnoredFolders": ["references"],
   "git.detectSubmodules": false,
+  "better-todo-tree.filtering.excludeGlobs": [
+      "**/node_modules/*/**",
+      "**/references/**/*"
+    ]
 }
