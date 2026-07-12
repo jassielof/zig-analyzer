@@ -14,9 +14,12 @@ const parse = @import("analysis/queries/parse.zig");
 const item_tree = @import("analysis/queries/item_tree.zig");
 const resolve = @import("analysis/queries/resolve.zig");
 const imports = @import("analysis/queries/imports.zig");
+const doc_comments = @import("analysis/queries/doc_comments.zig");
 const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
 const formatting = @import("formatting.zig");
 const semantic_tokens = @import("analysis/queries/semantic_tokens.zig");
+const inlay_hints = @import("analysis/queries/inlay_hints.zig");
+const uri_util = @import("uri.zig");
 
 /// Where the server is in the LSP lifecycle state machine (see the LSP spec's
 /// "Basic JSON Structures" / lifecycle section). Method handling depends on
@@ -53,6 +56,14 @@ pub const Server = struct {
     /// gpa-owned and must be freed on the next replacement or on
     /// `deinit`. The default's strings are literals; nothing to free.
     formatter_config_owned: bool = false,
+    /// Path to the `zig` executable used for `zig env` (stdlib discovery)
+    /// and as the default formatter command. Owned when set via options;
+    /// otherwise the `"zig"` literal.
+    zig_exe: []const u8 = "zig",
+    zig_exe_owned: bool = false,
+    /// Absolute path to Zig's `lib/` directory, discovered via `zig env`.
+    /// Used to resolve `@import("std")` to the local stdlib. Owned.
+    zig_lib_dir: ?[]const u8 = null,
 
     pub fn init(gpa: std.mem.Allocator, io: Io) Server {
         return .{ .gpa = gpa, .io = io, .documents = .init(gpa) };
@@ -63,6 +74,8 @@ pub const Server = struct {
         self.parse_cache.deinit(self.gpa);
         self.item_tree_cache.deinit(self.gpa);
         self.freeFormatterConfigIfOwned();
+        if (self.zig_exe_owned) self.gpa.free(self.zig_exe);
+        if (self.zig_lib_dir) |d| self.gpa.free(d);
     }
 
     fn freeFormatterConfigIfOwned(self: *Server) void {
@@ -99,11 +112,17 @@ pub const Server = struct {
     };
     const ServerOptions = struct {
         formatter: ?FormatterOptions = null,
+        /// Path to the `zig` executable (same setting the VS Code
+        /// extension exposes as `zigAnalyzer.zigPath`). Used to run
+        /// `zig env` so `@import("std")` resolves against the local
+        /// stdlib rather than anything on the web.
+        zigPath: ?[]const u8 = null,
     };
 
     /// Shared by `initialize`'s `initializationOptions` and
     /// `workspace/didChangeConfiguration`'s `settings` — both carry the
-    /// same `{ formatter: { command, args } }` shape (see extension.ts).
+    /// same `{ formatter: { command, args }, zigPath }` shape (see
+    /// extension.ts).
     fn applyOptions(self: *Server, options_value: std.json.Value) void {
         // Absent options (no `initializationOptions`, or a
         // `didChangeConfiguration` for an unrelated section) is the
@@ -118,12 +137,71 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
-        const formatter = parsed.value.formatter orelse return;
+        if (parsed.value.zigPath) |path| {
+            if (path.len > 0) self.setZigExe(path) catch |err| {
+                std.log.err("failed to apply zigPath: {t}", .{err});
+            };
+        }
+
+        const formatter = parsed.value.formatter orelse {
+            self.discoverZigLibDir();
+            return;
+        };
         const command = formatter.command orelse "zig";
         const args = formatter.args orelse &[_][]const u8{ "fmt", "--stdin" };
         self.setFormatterConfig(command, args) catch |err| {
             std.log.err("failed to apply formatter config: {t}", .{err});
         };
+        self.discoverZigLibDir();
+    }
+
+    fn setZigExe(self: *Server, path: []const u8) !void {
+        const owned = try self.gpa.dupe(u8, path);
+        if (self.zig_exe_owned) self.gpa.free(self.zig_exe);
+        self.zig_exe = owned;
+        self.zig_exe_owned = true;
+    }
+
+    /// Runs `zig env` and caches `lib_dir`. Best-effort: failure leaves
+    /// `zig_lib_dir` as-is (or null), so `@import("std")` simply stays
+    /// unresolved rather than breaking the server.
+    fn discoverZigLibDir(self: *Server) void {
+        const result = std.process.run(self.gpa, self.io, .{
+            .argv = &.{ self.zig_exe, "env" },
+        }) catch |err| {
+            std.log.err("failed to run '{s} env': {t}", .{ self.zig_exe, err });
+            return;
+        };
+        defer {
+            self.gpa.free(result.stdout);
+            self.gpa.free(result.stderr);
+        }
+
+        const ok = switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+        if (!ok) {
+            std.log.err("'{s} env' exited unsuccessfully", .{self.zig_exe});
+            return;
+        }
+
+        const Env = struct { lib_dir: ?[]const u8 = null };
+        const source = self.gpa.dupeZ(u8, result.stdout) catch return;
+        defer self.gpa.free(source);
+
+        var diag: std.zon.parse.Diagnostics = .{};
+        defer diag.deinit(self.gpa);
+        const env = std.zon.parse.fromSliceAlloc(Env, self.gpa, source, &diag, .{ .ignore_unknown_fields = true }) catch |err| {
+            std.log.err("failed to parse '{s} env' output: {t}", .{ self.zig_exe, err });
+            return;
+        };
+        defer std.zon.parse.free(self.gpa, env);
+
+        const lib_dir = env.lib_dir orelse return;
+        const owned = self.gpa.dupe(u8, lib_dir) catch return;
+        if (self.zig_lib_dir) |old| self.gpa.free(old);
+        self.zig_lib_dir = owned;
     }
 
     /// Dispatches one JSON-RPC message body. Writes a framed response to
@@ -172,6 +250,10 @@ pub const Server = struct {
             try self.handleRename(writer, msg);
         } else if (std.mem.eql(u8, msg.method, "textDocument/signatureHelp")) {
             try self.handleSignatureHelp(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/codeLens")) {
+            try self.handleCodeLens(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/inlayHint")) {
+            try self.handleInlayHint(writer, msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -194,6 +276,10 @@ pub const Server = struct {
         } else |err| {
             std.log.err("ignoring malformed initialize params: {t}", .{err});
         }
+        // Even with no initializationOptions, try to find the local
+        // stdlib via whatever `zig` is on PATH — needed for
+        // `@import("std")` hover/definition.
+        if (self.zig_lib_dir == null) self.discoverZigLibDir();
 
         const InitializeResult = struct {
             capabilities: struct {
@@ -221,6 +307,8 @@ pub const Server = struct {
                 signatureHelpProvider: struct {
                     triggerCharacters: []const []const u8 = &.{ "(", "," },
                 } = .{},
+                codeLensProvider: struct {} = .{},
+                inlayHintProvider: bool = true,
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
@@ -319,6 +407,8 @@ pub const Server = struct {
         severity: u8, // 1 = Error, 4 = Hint (used here for parser notes)
         source: []const u8 = "zig-analyzer",
         message: []const u8,
+        /// LSP DiagnosticTag values; `1` = Unnecessary (dims in the editor).
+        tags: []const u32 = &.{},
     };
 
     /// Reparses `uri` (a cache hit unless its text just changed) and
@@ -366,6 +456,7 @@ pub const Server = struct {
                     },
                     .severity = @intFromEnum(d.severity),
                     .message = try self.gpa.dupe(u8, d.message),
+                    .tags = d.tags,
                 });
             }
         }
@@ -388,7 +479,26 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
-        const initial = try self.resolveRequestPosition(parsed.value.textDocument.uri, parsed.value.position) orelse {
+        const uri = parsed.value.textDocument.uri;
+        const position = parsed.value.position;
+
+        // Prefer the `@import("...")` string itself when the cursor is on
+        // it — that was the remaining half of the go-to-definition FIXME
+        // (the binding name was already redirected in redirectImportBinding).
+        if (try self.definitionForImportString(uri, position)) |any| {
+            defer self.gpa.free(any.uri);
+            const LocationResult = struct { uri: []const u8, range: Range };
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
+                .uri = any.uri,
+                .range = .{
+                    .start = .{ .line = any.def.line, .character = any.def.character },
+                    .end = .{ .line = any.def.line, .character = any.def.end_character },
+                },
+            });
+            return;
+        }
+
+        const initial = try self.resolveRequestPosition(uri, position) orelse {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
         };
@@ -407,6 +517,25 @@ pub const Server = struct {
         });
     }
 
+    /// If `position` is inside an `@import("...")` string literal on a
+    /// top-level import binding, returns a definition pointing at the
+    /// start of the imported file (including `std` when `zig_lib_dir` is
+    /// known). The imported file doesn't need to be open.
+    fn definitionForImportString(self: *Server, uri: []const u8, position: Position) !?AnyDefinition {
+        const doc = self.documents.get(uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri, self.zig_lib_dir);
+        defer imports.freeImports(self.gpa, imports_list);
+
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const imp = imports.importAtOffset(imports_list, parsed_file.ast, offset) orelse return null;
+        const target_uri = imp.uri orelse return null;
+        return .{
+            .uri = try self.gpa.dupe(u8, target_uri),
+            .def = .{ .line = 0, .character = 0, .end_character = 0, .signature = "" },
+        };
+    }
+
     /// If `def` (already resolved, in the file at `uri`) is itself a
     /// top-level import binding (`const helpers = @import("helpers.zig");`),
     /// returns a `Definition` redirected to the start of the imported file
@@ -422,7 +551,7 @@ pub const Server = struct {
         const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
         const decl_name = nameOfDefinition(parsed_file.ast, def);
 
-        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri);
+        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri, self.zig_lib_dir);
         defer imports.freeImports(self.gpa, imports_list);
         for (imports_list) |imp| {
             if (!std.mem.eql(u8, imp.name, decl_name)) continue;
@@ -483,54 +612,62 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
-        const any = try self.resolveRequestPosition(parsed.value.textDocument.uri, parsed.value.position) orelse {
+        const uri = parsed.value.textDocument.uri;
+        const position = parsed.value.position;
+
+        // `@import("...")` string hover: show the target file's container
+        // docs (`//!`), with a range covering the string literal.
+        if (try self.hoverForImportString(uri, position)) |hover| {
+            defer {
+                self.gpa.free(hover.value);
+            }
+            const HoverContents = struct { kind: []const u8 = "markdown", value: []const u8 };
+            const HoverResult = struct {
+                contents: HoverContents,
+                range: Range,
+            };
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, HoverResult{
+                .contents = .{ .value = hover.value },
+                .range = hover.range,
+            });
+            return;
+        }
+
+        const any = try self.resolveRequestPosition(uri, position) orelse {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
         };
         defer self.gpa.free(any.uri);
 
-        // Doctest lookup happens against the *declaration's* file, which
-        // for a cross-file hover (`helpers.add`) is the imported file,
-        // not the requesting one — re-fetching via the cache is a hit in
-        // that case (resolveRequestPosition already parsed it) and a
-        // guaranteed hit in the same-file case.
+        // Doctest + declaration docs live on the *declaration's* file.
         var doctest: ?[]u8 = null;
         defer if (doctest) |dt| self.gpa.free(dt);
-        if (self.documents.get(any.uri)) |target_doc| {
-            const target_parsed = try parse.parse(&self.parse_cache, self.gpa, any.uri, target_doc.text, target_doc.revision);
-            const decl_name = nameOfDefinition(target_parsed.ast, any.def);
-            if (resolve.findDoctest(target_parsed.ast, decl_name)) |raw| {
+        var docs: ?[]const u8 = null;
+        defer if (docs) |d| self.gpa.free(d);
+
+        if (try self.parseUri(any.uri)) |target| {
+            defer target.deinit(self);
+            const decl_name = nameOfDefinition(target.ast, any.def);
+            if (resolve.findDoctest(target.ast, decl_name)) |raw| {
                 doctest = try formatDoctestBody(self.gpa, raw);
+            }
+            // Import bindings show the *imported file's* container docs,
+            // not (usually nonexistent) docs on the local `const`.
+            if (try self.containerDocsForImportBinding(uri, decl_name)) |container| {
+                docs = container;
+            } else {
+                docs = try doc_comments.getDocCommentsForRootName(self.gpa, target.ast, decl_name);
             }
         }
 
-        const value = if (doctest) |dt|
-            try std.fmt.allocPrint(
-                self.gpa,
-                \\```zig
-                \\{s}
-                \\```
-                \\
-                \\---
-                \\
-                \\## Doctest example
-                \\
-                \\```zig
-                \\{s}
-                \\```
-            ,
-                .{ any.def.signature, dt },
-            )
-        else
-            try std.fmt.allocPrint(
-                self.gpa,
-                \\```zig
-                \\{s}
-                \\```
-            ,
-                .{any.def.signature},
-            );
+        const value = try formatHoverMarkdown(self.gpa, any.def.signature, docs, doctest);
         defer self.gpa.free(value);
+
+        // Hover's range highlights the hovered word in the *current*
+        // document. When we resolved cross-file, `any.def` is in the
+        // other file — re-derive a range from the request position's
+        // identifier instead so the highlight stays local.
+        const range = try self.hoverRangeAt(uri, position, any);
 
         const HoverContents = struct { kind: []const u8 = "markdown", value: []const u8 };
         const HoverResult = struct {
@@ -539,11 +676,174 @@ pub const Server = struct {
         };
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, HoverResult{
             .contents = .{ .value = value },
-            .range = .{
+            .range = range,
+        });
+    }
+
+    const HoverPayload = struct { value: []u8, range: Range };
+
+    fn hoverForImportString(self: *Server, uri: []const u8, position: Position) !?HoverPayload {
+        const doc = self.documents.get(uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri, self.zig_lib_dir);
+        defer imports.freeImports(self.gpa, imports_list);
+
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const imp = imports.importAtOffset(imports_list, parsed_file.ast, offset) orelse return null;
+        const target_uri = imp.uri orelse return null;
+
+        const loc = parsed_file.ast.tokenLocation(0, imp.string_token);
+        const range: Range = .{
+            .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
+            .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + parsed_file.ast.tokenSlice(imp.string_token).len) },
+        };
+
+        const signature = try std.fmt.allocPrint(self.gpa, "@import(\"{s}\")", .{imp.path});
+        defer self.gpa.free(signature);
+
+        var docs: ?[]const u8 = null;
+        defer if (docs) |d| self.gpa.free(d);
+        docs = try self.containerDocsForUri(target_uri);
+
+        const value = try formatHoverMarkdown(self.gpa, signature, docs, null);
+        return .{ .value = value, .range = range };
+    }
+
+    /// If `decl_name` in `importer_uri` is an import binding, returns the
+    /// imported file's `//!` container docs (owned).
+    fn containerDocsForImportBinding(self: *Server, importer_uri: []const u8, decl_name: []const u8) !?[]const u8 {
+        const doc = self.documents.get(importer_uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, importer_uri, doc.text, doc.revision);
+        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, importer_uri, self.zig_lib_dir);
+        defer imports.freeImports(self.gpa, imports_list);
+        for (imports_list) |imp| {
+            if (!std.mem.eql(u8, imp.name, decl_name)) continue;
+            const target_uri = imp.uri orelse return null;
+            return try self.containerDocsForUri(target_uri);
+        }
+        return null;
+    }
+
+    fn containerDocsForUri(self: *Server, target_uri: []const u8) !?[]const u8 {
+        const target = try self.parseUri(target_uri) orelse return null;
+        defer target.deinit(self);
+        return try doc_comments.getContainerDocComments(self.gpa, target.ast);
+    }
+
+    const ParsedUri = struct {
+        ast: Ast,
+        /// When non-null, `ast` was parsed from a freshly-read disk file
+        /// (not the document store / parse cache) and must be freed.
+        owned_source: ?[:0]u8 = null,
+        owned_ast: bool = false,
+
+        fn deinit(self: ParsedUri, server: *Server) void {
+            if (self.owned_ast) {
+                var ast = self.ast;
+                ast.deinit(server.gpa);
+            }
+            if (self.owned_source) |s| server.gpa.free(s);
+        }
+    };
+
+    /// Returns a parsed AST for `target_uri`: from the open-document
+    /// cache when the client has it open, otherwise by reading the file
+    /// from disk (needed for stdlib / closed relative imports).
+    fn parseUri(self: *Server, target_uri: []const u8) !?ParsedUri {
+        if (self.documents.get(target_uri)) |doc| {
+            const parsed_file = try parse.parse(&self.parse_cache, self.gpa, target_uri, doc.text, doc.revision);
+            return .{ .ast = parsed_file.ast };
+        }
+
+        const path = uri_util.toFsPath(self.gpa, target_uri) catch return null;
+        defer self.gpa.free(path);
+
+        var file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch return null;
+        defer file.close(self.io);
+
+        var read_buf: [4096]u8 = undefined;
+        var file_reader: Io.File.Reader = .init(file, self.io, &read_buf);
+        const source = std.zig.readSourceFileToEndAlloc(self.gpa, &file_reader) catch return null;
+        errdefer self.gpa.free(source);
+
+        const ast = try Ast.parse(self.gpa, source, .zig);
+        return .{ .ast = ast, .owned_source = source, .owned_ast = true };
+    }
+
+    fn hoverRangeAt(self: *Server, uri: []const u8, position: Position, any: AnyDefinition) !Range {
+        // Same-file: the definition's own span is the right highlight.
+        if (std.mem.eql(u8, uri, any.uri)) {
+            return .{
                 .start = .{ .line = any.def.line, .character = any.def.character },
                 .end = .{ .line = any.def.line, .character = any.def.end_character },
-            },
-        });
+            };
+        }
+        // Cross-file: highlight the identifier under the cursor in the
+        // requesting document instead.
+        const doc = self.documents.get(uri) orelse {
+            return .{
+                .start = position,
+                .end = position,
+            };
+        };
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        // Prefer the field of a `base.field` access when that's what was
+        // hovered; otherwise the identifier token at the offset.
+        if (resolve.fieldAccessAt(parsed_file.ast, .{ .line = position.line, .character = position.character })) |fa| {
+            _ = fa;
+            // fieldAccessAt doesn't expose the field token; fall through
+            // to the identifier-at-offset scan.
+        }
+        var idx: Ast.TokenIndex = 0;
+        while (idx < parsed_file.ast.tokens.len) : (idx += 1) {
+            if (parsed_file.ast.tokenTag(idx) != .identifier) continue;
+            const start = parsed_file.ast.tokenStart(idx);
+            const slice = parsed_file.ast.tokenSlice(idx);
+            const end = start + slice.len;
+            if (offset >= start and offset < end) {
+                const loc = parsed_file.ast.tokenLocation(0, idx);
+                return .{
+                    .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
+                    .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + slice.len) },
+                };
+            }
+        }
+        return .{ .start = position, .end = position };
+    }
+
+    fn formatHoverMarkdown(gpa: std.mem.Allocator, signature: []const u8, docs: ?[]const u8, doctest: ?[]const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+
+        try out.print(gpa,
+            \\```zig
+            \\{s}
+            \\```
+        , .{signature});
+
+        if (docs) |d| {
+            if (d.len > 0) {
+                try out.appendSlice(gpa, "\n\n");
+                try out.appendSlice(gpa, d);
+            }
+        }
+
+        if (doctest) |dt| {
+            try out.print(gpa,
+                \\
+                \\
+                \\---
+                \\
+                \\## Doctest example
+                \\
+                \\```zig
+                \\{s}
+                \\```
+            , .{dt});
+        }
+
+        return try out.toOwnedSlice(gpa);
     }
 
     const AnyDefinition = struct { uri: []const u8, def: resolve.Definition };
@@ -587,7 +887,7 @@ pub const Server = struct {
         importer_ast: Ast,
         field_access: resolve.FieldAccess,
     ) !?CrossFileDefinition {
-        const imports_list = try imports.findImports(self.gpa, importer_ast, importer_uri);
+        const imports_list = try imports.findImports(self.gpa, importer_ast, importer_uri, self.zig_lib_dir);
         defer imports.freeImports(self.gpa, imports_list);
 
         for (imports_list) |imp| {
@@ -1033,6 +1333,141 @@ pub const Server = struct {
             .activeParameter = ctx.active_parameter,
         });
     }
+
+    fn handleCodeLens(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct { textDocument: struct { uri: []const u8 } };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/codeLens params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, &[_]u8{});
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+
+        const CodeLensResult = struct {
+            range: Range,
+            command: struct { title: []const u8, command: []const u8 = "" },
+        };
+        var lenses: std.ArrayList(CodeLensResult) = .empty;
+        defer {
+            for (lenses.items) |l| self.gpa.free(l.command.title);
+            lenses.deinit(self.gpa);
+        }
+
+        for (tree.items) |item| {
+            const def = resolve.definitionForRootItem(parsed_file.ast, item.name) orelse continue;
+            const refs = try resolve.findReferences(self.gpa, parsed_file.ast, tree.*, item.name, def.line, def.character);
+            defer self.gpa.free(refs);
+
+            const title = if (refs.len == 1)
+                try self.gpa.dupe(u8, "1 reference")
+            else
+                try std.fmt.allocPrint(self.gpa, "{d} references", .{refs.len});
+
+            try lenses.append(self.gpa, .{
+                .range = .{
+                    .start = .{ .line = def.line, .character = def.character },
+                    .end = .{ .line = def.line, .character = def.end_character },
+                },
+                .command = .{ .title = title },
+            });
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, lenses.items);
+    }
+
+    const InlayLookupCtx = struct {
+        server: *Server,
+        importer_uri: []const u8,
+        importer_ast: Ast,
+        tree: item_tree.ItemTree,
+    };
+
+    fn inlayLookupSignature(ctx_ptr: *anyopaque, base: ?[]const u8, name: []const u8) ?[]const u8 {
+        const ctx: *InlayLookupCtx = @ptrCast(@alignCast(ctx_ptr));
+        if (base) |b| {
+            // Cross-file: helpers.add → look up `add` in the imported file.
+            // resolveCrossFile is async-allocating; we can't call it from a
+            // sync callback that returns a borrowed slice easily. Inline the
+            // same lookup against already-open documents.
+            const imports_list = imports.findImports(ctx.server.gpa, ctx.importer_ast, ctx.importer_uri, ctx.server.zig_lib_dir) catch return null;
+            defer imports.freeImports(ctx.server.gpa, imports_list);
+            for (imports_list) |imp| {
+                if (!std.mem.eql(u8, imp.name, b)) continue;
+                const target_uri = imp.uri orelse return null;
+                const target_doc = ctx.server.documents.get(target_uri) orelse return null;
+                const target_parsed = parse.parse(&ctx.server.parse_cache, ctx.server.gpa, target_uri, target_doc.text, target_doc.revision) catch return null;
+                const target_tree = item_tree.itemTree(&ctx.server.item_tree_cache, ctx.server.gpa, target_uri, target_parsed.ast, target_doc.revision) catch return null;
+                const item = target_tree.find(name) orelse return null;
+                if (item.kind != .function) return null;
+                return item.signature;
+            }
+            return null;
+        }
+        const item = ctx.tree.find(name) orelse return null;
+        if (item.kind != .function) return null;
+        return item.signature;
+    }
+
+    fn handleInlayHint(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct {
+            textDocument: struct { uri: []const u8 },
+            range: Range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = std.math.maxInt(u32), .character = 0 } },
+        };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/inlayHint params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, &[_]u8{});
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
+
+        var lookup_ctx: InlayLookupCtx = .{
+            .server = self,
+            .importer_uri = uri,
+            .importer_ast = parsed_file.ast,
+            .tree = tree.*,
+        };
+
+        const hints = try inlay_hints.collect(self.gpa, parsed_file.ast, tree.*, inlayLookupSignature, &lookup_ctx);
+        defer inlay_hints.freeHints(self.gpa, hints);
+
+        const InlayHintResult = struct {
+            position: Position,
+            label: []const u8,
+            paddingLeft: bool = false,
+            paddingRight: bool = false,
+            kind: u8 = 2, // Parameter
+        };
+        var results: std.ArrayList(InlayHintResult) = .empty;
+        defer results.deinit(self.gpa);
+
+        for (hints) |h| {
+            // Only include hints that fall within the requested range.
+            if (h.line < parsed.value.range.start.line) continue;
+            if (h.line > parsed.value.range.end.line) continue;
+            try results.append(self.gpa, .{
+                .position = .{ .line = h.line, .character = h.character },
+                .label = h.label,
+            });
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, results.items);
+    }
 };
 
 const harness = @import("protocol/harness.zig");
@@ -1124,7 +1559,7 @@ test "didOpen tracks the document; didChange replaces its text and bumps its rev
     defer server.deinit();
 
     var opened = try harness.run(gpa, &server, &.{
-        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","languageId":"zig","version":1,"text":"const x = 1;"}}}
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","languageId":"zig","version":1,"text":"pub const x = 1;"}}}
     });
     defer opened.deinit();
     // No response to the notification itself, but one server-initiated
@@ -1136,16 +1571,16 @@ test "didOpen tracks the document; didChange replaces its text and bumps its rev
     try std.testing.expectEqual(@as(usize, 0), diag.value.object.get("params").?.object.get("diagnostics").?.array.items.len);
 
     const after_open = server.documents.get("file:///a.zig").?;
-    try std.testing.expectEqualStrings("const x = 1;", after_open.text);
+    try std.testing.expectEqualStrings("pub const x = 1;", after_open.text);
     const revision_after_open = after_open.revision;
 
     var changed = try harness.run(gpa, &server, &.{
-        \\{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///a.zig","version":2},"contentChanges":[{"text":"const x = 2;"}]}}
+        \\{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///a.zig","version":2},"contentChanges":[{"text":"pub const x = 2;"}]}}
     });
     defer changed.deinit();
 
     const after_change = server.documents.get("file:///a.zig").?;
-    try std.testing.expectEqualStrings("const x = 2;", after_change.text);
+    try std.testing.expectEqualStrings("pub const x = 2;", after_change.text);
     try std.testing.expect(after_change.revision != revision_after_open);
 }
 
@@ -1450,14 +1885,14 @@ test "publishDiagnostics includes semantic diagnostics for syntactically valid f
     const items = diag.value.object.get("params").?.object.get("diagnostics").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), items.len); // unused local + duplicate fn
 
-    var saw_warning = false;
+    var saw_hint = false;
     var saw_error = false;
     for (items) |item| {
         const severity = item.object.get("severity").?.integer;
-        if (severity == 2) saw_warning = true;
+        if (severity == 4) saw_hint = true; // unused → Hint + Unnecessary tag
         if (severity == 1) saw_error = true;
     }
-    try std.testing.expect(saw_warning);
+    try std.testing.expect(saw_hint);
     try std.testing.expect(saw_error);
 }
 
@@ -1529,6 +1964,204 @@ test "textDocument/hover includes a matching doctest as an Example section" {
     try std.testing.expect(std.mem.indexOf(u8, value, "_ = addOne(41);") != null);
     try std.testing.expect(std.mem.indexOf(u8, value, "{\n") == null);
     try std.testing.expect(std.mem.indexOf(u8, value, "    _ = addOne") == null);
+}
+
+test "textDocument/hover includes /// doc comments" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"/// Adds one to a number.\nfn addOne(n: i32) i32 {\n    return n + 1;\n}\nfn main() void {\n    _ = addOne(1);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":5,"character":9}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const value = parsed.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value, "fn addOne(n: i32) i32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value, "Adds one to a number.") != null);
+}
+
+test "textDocument/hover on import binding shows container docs" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/helpers.zig","text":"//! Math helpers.\n\npub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const helpers = @import(\"helpers.zig\");\nfn main() void {\n    _ = helpers.add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    // Hover the binding name `helpers` on the const line.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":8}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const value = parsed.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value, "Math helpers.") != null);
+
+    // Hover the `"helpers.zig"` string itself.
+    var responses2 = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":28}}}
+    });
+    defer responses2.deinit();
+
+    var parsed2 = try std.json.parseFromSlice(std.json.Value, gpa, responses2.messages.items[0], .{});
+    defer parsed2.deinit();
+    const value2 = parsed2.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value2, "@import(\"helpers.zig\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, value2, "Math helpers.") != null);
+}
+
+test "textDocument/definition on import string jumps to the imported file" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/helpers.zig","text":"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const helpers = @import(\"helpers.zig\");\n"}}}
+    });
+    defer opened.deinit();
+
+    // Cursor on the 'h' of "helpers.zig" inside the string literal.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":26}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("file:///proj/helpers.zig", result.get("uri").?.string);
+    try std.testing.expectEqual(@as(i64, 0), result.get("range").?.object.get("start").?.object.get("line").?.integer);
+}
+
+test "textDocument/hover on @import(\"std\") uses local stdlib docs" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    // Discover zig_lib_dir via `zig env`.
+    var init_responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+    });
+    defer init_responses.deinit();
+    try std.testing.expect(server.zig_lib_dir != null);
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const std = @import(\"std\");\n"}}}
+    });
+    defer opened.deinit();
+
+    // Hover the "std" string inside @import("std").
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":22}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    // std.zig itself may not have //! docs; the hover must at least
+    // resolve and show the @import signature rather than returning null.
+    const result = parsed.value.object.get("result");
+    try std.testing.expect(result != null and result.? != .null);
+    const value = result.?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value, "@import(\"std\")") != null);
+
+    // Go-to-definition on the string must land in the local stdlib.
+    var def_responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":22}}}
+    });
+    defer def_responses.deinit();
+    var def_parsed = try std.json.parseFromSlice(std.json.Value, gpa, def_responses.messages.items[0], .{});
+    defer def_parsed.deinit();
+    const def_uri = def_parsed.value.object.get("result").?.object.get("uri").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, def_uri, "/std/std.zig") != null);
+    try std.testing.expect(std.mem.startsWith(u8, def_uri, "file://"));
+}
+
+test "textDocument/codeLens reports reference counts" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn helper() void {}\nfn a() void {\n    helper();\n}\nfn b() void {\n    helper();\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/codeLens","params":{"textDocument":{"uri":"file:///a.zig"}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const lenses = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), lenses.len); // helper, a, b
+
+    var found_helper = false;
+    for (lenses) |lens| {
+        const title = lens.object.get("command").?.object.get("title").?.string;
+        if (std.mem.eql(u8, title, "2 references")) found_helper = true;
+    }
+    try std.testing.expect(found_helper);
+}
+
+test "textDocument/inlayHint shows parameter names at call sites" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\nfn main() void {\n    _ = add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":"file:///a.zig"},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const hints = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), hints.len);
+    try std.testing.expectEqualStrings("a: ", hints[0].object.get("label").?.string);
+    try std.testing.expectEqualStrings("b: ", hints[1].object.get("label").?.string);
+}
+
+test "unused import is published with the Unnecessary diagnostic tag" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"const std = @import(\"std\");\n"}}}
+    });
+    defer opened.deinit();
+
+    var diag = try std.json.parseFromSlice(std.json.Value, gpa, opened.messages.items[0], .{});
+    defer diag.deinit();
+    const items = diag.value.object.get("params").?.object.get("diagnostics").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expect(std.mem.indexOf(u8, items[0].object.get("message").?.string, "unused import") != null);
+    const tags = items[0].object.get("tags").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), tags.len);
+    try std.testing.expectEqual(@as(i64, 1), tags[0].integer); // Unnecessary
 }
 
 test "textDocument/documentSymbol lists top-level declarations" {

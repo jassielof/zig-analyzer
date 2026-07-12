@@ -24,9 +24,15 @@ export function activate(context: vscode.ExtensionContext): void {
       runBuildStep(),
     ),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("zigAnalyzer.formatter")) {
+      if (
+        e.affectsConfiguration("zigAnalyzer.formatter") ||
+        e.affectsConfiguration("zigAnalyzer.zigPath")
+      ) {
         void client?.sendNotification("workspace/didChangeConfiguration", {
-          settings: { formatter: getFormatterConfig() },
+          settings: {
+            formatter: getFormatterConfig(),
+            zigPath: getZigPath(),
+          },
         });
       }
     }),
@@ -57,6 +63,7 @@ async function start(): Promise<void> {
     },
     initializationOptions: {
       formatter: getFormatterConfig(),
+      zigPath: getZigPath(),
     },
   };
 

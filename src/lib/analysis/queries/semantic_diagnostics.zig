@@ -1,6 +1,8 @@
 //! Structurally-derivable semantic diagnostics: duplicate top-level
-//! declarations and unused local variables. Not cached — cheap relative
-//! to parsing/item-tree building, same as `resolve.zig`/`imports.zig`.
+//! declarations, unused locals, unused private top-level decls, and
+//! unused imports. Unused findings carry LSP's `Unnecessary` tag so
+//! editors dim them. Not cached — cheap relative to parsing/item-tree
+//! building, same as `resolve.zig`/`imports.zig`.
 //!
 //! "Unresolved identifier" diagnostics (also named in the project plan's
 //! Phase 7 scope) are deliberately deferred, not silently skipped: doing
@@ -18,6 +20,9 @@ const Ast = std.zig.Ast;
 
 pub const Severity = enum(u8) { err = 1, warning = 2, information = 3, hint = 4 };
 
+/// LSP `DiagnosticTag`: `Unnecessary = 1` dims the range in editors.
+pub const Tag = enum(u32) { unnecessary = 1 };
+
 pub const Diagnostic = struct {
     line: u32,
     character: u32,
@@ -25,6 +30,9 @@ pub const Diagnostic = struct {
     severity: Severity,
     /// Owned.
     message: []const u8,
+    /// Optional LSP diagnostic tags (e.g. Unnecessary for unused code).
+    /// Not owned — points at a static slice when set.
+    tags: []const u32 = &.{},
 };
 
 pub fn freeDiagnostics(gpa: std.mem.Allocator, diags: []const Diagnostic) void {
@@ -127,12 +135,110 @@ fn checkUnusedLocals(gpa: std.mem.Allocator, ast: Ast, out: *std.ArrayList(Diagn
                     .line = loc.line,
                     .character = loc.character,
                     .end_character = loc.end_character,
-                    .severity = .warning,
+                    .severity = .hint,
                     .message = try std.fmt.allocPrint(gpa, "unused local variable '{s}'", .{name}),
+                    .tags = &.{@intFromEnum(Tag.unnecessary)},
                 });
             }
         }
     }
+}
+
+/// Flags a non-`pub` top-level function/const whose name never appears
+/// again in the file. `pub` declarations are skipped — they may be used
+/// from other files we haven't analyzed. Names starting with `_` are the
+/// conventional intentional-discard marker. Import bindings are handled
+/// separately by `checkUnusedImports` so their messages can say so.
+fn checkUnusedPrivateDecls(gpa: std.mem.Allocator, ast: Ast, out: *std.ArrayList(Diagnostic)) !void {
+    for (ast.rootDecls()) |node| {
+        const name_token = declNameToken(ast, node) orelse continue;
+        const name = ast.tokenSlice(name_token);
+        if (name.len > 0 and name[0] == '_') continue;
+
+        const is_pub = switch (ast.nodeTag(node)) {
+            .fn_decl => blk: {
+                const proto_node, _ = ast.nodeData(node).node_and_node;
+                var buf: [1]Ast.Node.Index = undefined;
+                const proto = ast.fullFnProto(&buf, proto_node) orelse break :blk false;
+                break :blk proto.visib_token != null;
+            },
+            .fn_proto, .fn_proto_one, .fn_proto_simple, .fn_proto_multi => blk: {
+                var buf: [1]Ast.Node.Index = undefined;
+                const proto = ast.fullFnProto(&buf, node) orelse break :blk false;
+                break :blk proto.visib_token != null;
+            },
+            .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => blk: {
+                const var_decl = ast.fullVarDecl(node) orelse break :blk false;
+                break :blk var_decl.visib_token != null;
+            },
+            else => false,
+        };
+        if (is_pub) continue;
+
+        // Skip import bindings — `checkUnusedImports` covers them.
+        if (isImportBinding(ast, node)) continue;
+
+        if (!nameUsedElsewhere(ast, name, name_token)) {
+            const loc = locationOf(ast, name_token);
+            const kind: []const u8 = switch (ast.nodeTag(node)) {
+                .fn_decl, .fn_proto, .fn_proto_one, .fn_proto_simple, .fn_proto_multi => "function",
+                else => "declaration",
+            };
+            try out.append(gpa, .{
+                .line = loc.line,
+                .character = loc.character,
+                .end_character = loc.end_character,
+                .severity = .hint,
+                .message = try std.fmt.allocPrint(gpa, "unused {s} '{s}'", .{ kind, name }),
+                .tags = &.{@intFromEnum(Tag.unnecessary)},
+            });
+        }
+    }
+}
+
+fn isImportBinding(ast: Ast, node: Ast.Node.Index) bool {
+    switch (ast.nodeTag(node)) {
+        .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {},
+        else => return false,
+    }
+    const var_decl = ast.fullVarDecl(node) orelse return false;
+    const init_node = var_decl.ast.init_node.unwrap() orelse return false;
+    switch (ast.nodeTag(init_node)) {
+        .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => {},
+        else => return false,
+    }
+    return std.mem.eql(u8, ast.tokenSlice(ast.nodeMainToken(init_node)), "@import");
+}
+
+fn checkUnusedImports(gpa: std.mem.Allocator, ast: Ast, out: *std.ArrayList(Diagnostic)) !void {
+    for (ast.rootDecls()) |node| {
+        if (!isImportBinding(ast, node)) continue;
+        const name_token = declNameToken(ast, node) orelse continue;
+        const name = ast.tokenSlice(name_token);
+        if (name.len > 0 and name[0] == '_') continue;
+
+        if (!nameUsedElsewhere(ast, name, name_token)) {
+            const loc = locationOf(ast, name_token);
+            try out.append(gpa, .{
+                .line = loc.line,
+                .character = loc.character,
+                .end_character = loc.end_character,
+                .severity = .hint,
+                .message = try std.fmt.allocPrint(gpa, "unused import '{s}'", .{name}),
+                .tags = &.{@intFromEnum(Tag.unnecessary)},
+            });
+        }
+    }
+}
+
+fn nameUsedElsewhere(ast: Ast, name: []const u8, decl_token: Ast.TokenIndex) bool {
+    var idx: Ast.TokenIndex = 0;
+    while (idx < ast.tokens.len) : (idx += 1) {
+        if (idx == decl_token) continue;
+        if (ast.tokenTag(idx) != .identifier) continue;
+        if (std.mem.eql(u8, ast.tokenSlice(idx), name)) return true;
+    }
+    return false;
 }
 
 /// Runs every structural check and returns the combined diagnostics.
@@ -146,6 +252,8 @@ pub fn check(gpa: std.mem.Allocator, ast: Ast) ![]const Diagnostic {
 
     try checkDuplicateDeclarations(gpa, ast, &out);
     try checkUnusedLocals(gpa, ast, &out);
+    try checkUnusedPrivateDecls(gpa, ast, &out);
+    try checkUnusedImports(gpa, ast, &out);
 
     return out.toOwnedSlice(gpa);
 }
@@ -179,24 +287,26 @@ test "flags a duplicate top-level const declaration" {
 
 test "no diagnostics for distinctly-named declarations" {
     const gpa = testing.allocator;
-    const diags = try checkSource(gpa, "fn f() void {}\nfn g() void {}\nconst x = 1;\n");
+    const diags = try checkSource(gpa, "pub fn f() void {}\npub fn g() void {}\npub const x = 1;\n");
     defer freeDiagnostics(gpa, diags);
     try testing.expectEqual(@as(usize, 0), diags.len);
 }
 
 test "flags an unused local variable" {
     const gpa = testing.allocator;
-    const diags = try checkSource(gpa, "fn f() void {\n    const unused = 1;\n}\n");
+    const diags = try checkSource(gpa, "pub fn f() void {\n    const unused = 1;\n}\n");
     defer freeDiagnostics(gpa, diags);
 
     try testing.expectEqual(@as(usize, 1), diags.len);
-    try testing.expectEqual(Severity.warning, diags[0].severity);
+    try testing.expectEqual(Severity.hint, diags[0].severity);
     try testing.expect(std.mem.indexOf(u8, diags[0].message, "'unused'") != null);
+    try testing.expectEqual(@as(usize, 1), diags[0].tags.len);
+    try testing.expectEqual(@as(u32, 1), diags[0].tags[0]); // Unnecessary
 }
 
 test "does not flag a local variable that's used later in the function" {
     const gpa = testing.allocator;
-    const diags = try checkSource(gpa, "fn f() i32 {\n    const x = 1;\n    return x;\n}\n");
+    const diags = try checkSource(gpa, "pub fn f() i32 {\n    const x = 1;\n    return x;\n}\n");
     defer freeDiagnostics(gpa, diags);
     try testing.expectEqual(@as(usize, 0), diags.len);
 }
@@ -207,21 +317,54 @@ test "does not flag a local used only inside a nested block" {
     // function body, not just its immediate statements, or this would
     // wrongly flag `x`.
     const gpa = testing.allocator;
-    const diags = try checkSource(gpa, "fn f() void {\n    const x = 1;\n    if (true) {\n        _ = x;\n    }\n}\n");
+    const diags = try checkSource(gpa, "pub fn f() void {\n    const x = 1;\n    if (true) {\n        _ = x;\n    }\n}\n");
     defer freeDiagnostics(gpa, diags);
     try testing.expectEqual(@as(usize, 0), diags.len);
 }
 
 test "does not flag a discard-named local" {
     const gpa = testing.allocator;
-    const diags = try checkSource(gpa, "fn f() void {\n    const _unused = 1;\n}\n");
+    const diags = try checkSource(gpa, "pub fn f() void {\n    const _unused = 1;\n}\n");
     defer freeDiagnostics(gpa, diags);
     try testing.expectEqual(@as(usize, 0), diags.len);
 }
 
 test "function parameters are never flagged as unused locals" {
     const gpa = testing.allocator;
-    const diags = try checkSource(gpa, "fn f(unused_param: i32) void {}\n");
+    const diags = try checkSource(gpa, "pub fn f(unused_param: i32) void {}\n");
+    defer freeDiagnostics(gpa, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "flags an unused private function" {
+    const gpa = testing.allocator;
+    const diags = try checkSource(gpa, "fn unused() void {}\npub fn main() void {}\n");
+    defer freeDiagnostics(gpa, diags);
+
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expect(std.mem.indexOf(u8, diags[0].message, "unused function") != null);
+    try testing.expectEqual(@as(u32, 1), diags[0].tags[0]);
+}
+
+test "does not flag a pub function as unused" {
+    const gpa = testing.allocator;
+    const diags = try checkSource(gpa, "pub fn usedElsewhere() void {}\n");
+    defer freeDiagnostics(gpa, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "flags an unused import" {
+    const gpa = testing.allocator;
+    const diags = try checkSource(gpa, "const std = @import(\"std\");\n");
+    defer freeDiagnostics(gpa, diags);
+
+    try testing.expectEqual(@as(usize, 1), diags.len);
+    try testing.expect(std.mem.indexOf(u8, diags[0].message, "unused import") != null);
+}
+
+test "does not flag an import that's used" {
+    const gpa = testing.allocator;
+    const diags = try checkSource(gpa, "const std = @import(\"std\");\ntest \"t\" {\n    _ = std;\n}\n");
     defer freeDiagnostics(gpa, diags);
     try testing.expectEqual(@as(usize, 0), diags.len);
 }
