@@ -16,6 +16,39 @@ const imports = @import("imports.zig");
 
 pub const PackageMap = imports.PackageMap;
 
+/// How a workspace root is analyzed for packages / modules.
+pub const WorkspaceMode = enum {
+    /// Has `build.zig` (and optionally `build.zig.zon`).
+    build_script,
+    /// No build script — relative `@import` and `std` only.
+    freestanding,
+};
+
+/// True when `workspace_root_path/build.zig` exists on disk.
+pub fn hasBuildZig(io: std.Io, workspace_root_path: []const u8) bool {
+    const build_path = std.fs.path.join(std.heap.page_allocator, &.{ workspace_root_path, "build.zig" }) catch return false;
+    defer std.heap.page_allocator.free(build_path);
+    return fileExists(io, build_path);
+}
+
+pub fn detectWorkspaceMode(io: std.Io, workspace_root_path: []const u8) WorkspaceMode {
+    return if (hasBuildZig(io, workspace_root_path)) .build_script else .freestanding;
+}
+
+/// Walks parents of `file_path` looking for a `build.zig`.
+pub fn fileHasAncestorBuildZig(io: std.Io, file_path: []const u8) bool {
+    var dir = std.heap.page_allocator.dupe(u8, std.fs.path.dirname(file_path) orelse file_path) catch return false;
+    defer std.heap.page_allocator.free(dir);
+    while (true) {
+        if (hasBuildZig(io, dir)) return true;
+        const parent = std.fs.path.dirname(dir) orelse return false;
+        if (std.mem.eql(u8, parent, dir)) return false;
+        const next = std.heap.page_allocator.dupe(u8, parent) catch return false;
+        std.heap.page_allocator.free(dir);
+        dir = next;
+    }
+}
+
 /// Clears and frees every entry in `map`.
 pub fn clearPackages(gpa: std.mem.Allocator, map: *PackageMap) void {
     var it = map.iterator();
@@ -204,9 +237,9 @@ fn findMatchingParen(source: []const u8, open_index: usize) ?usize {
     return null;
 }
 
-/// Walks parent directories of `file_path` looking for `build.zig.zon` and
-/// loads packages from the first one found. No-op if `out` already has
-/// entries (workspace-folder load already succeeded).
+/// Walks parent directories of `file_path` looking for `build.zig` or
+/// `build.zig.zon` and loads packages from the first package root found.
+/// No-op if `out` already has entries (workspace-folder load already succeeded).
 pub fn loadDepsWalkingUpFromFile(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -222,7 +255,9 @@ pub fn loadDepsWalkingUpFromFile(
     while (true) {
         const zon_path = try std.fs.path.join(gpa, &.{ dir, "build.zig.zon" });
         defer gpa.free(zon_path);
-        if (fileExists(io, zon_path)) {
+        const build_path = try std.fs.path.join(gpa, &.{ dir, "build.zig" });
+        defer gpa.free(build_path);
+        if (fileExists(io, zon_path) or fileExists(io, build_path)) {
             try loadDepsFromWorkspace(gpa, io, dir, global_cache_dir, out);
             return;
         }

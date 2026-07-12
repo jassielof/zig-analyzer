@@ -40,7 +40,20 @@ pub fn freeHints(gpa: std.mem.Allocator, hints: []const Hint) void {
 /// literals, whose type is `*const [N:0]u8`). Covers top-level
 /// declarations and the immediate body of each function — the same scope
 /// boundary `resolve.zig`'s local resolution uses.
+///
+/// `resolveInitType` is optional: when non-null, used for non-literal
+/// initializers (e.g. method-call return types). It must return an owned
+/// label like `": *Module"`, or null to skip.
 pub fn collectTypeHints(gpa: std.mem.Allocator, ast: Ast) ![]const Hint {
+    return collectTypeHintsWithResolver(gpa, ast, null, null);
+}
+
+pub fn collectTypeHintsWithResolver(
+    gpa: std.mem.Allocator,
+    ast: Ast,
+    resolveInitType: ?*const fn (ctx: *anyopaque, init_node: Ast.Node.Index) ?[]const u8,
+    resolve_ctx: ?*anyopaque,
+) ![]const Hint {
     var out: std.ArrayList(Hint) = .empty;
     errdefer {
         for (out.items) |h| gpa.free(h.label);
@@ -48,18 +61,25 @@ pub fn collectTypeHints(gpa: std.mem.Allocator, ast: Ast) ![]const Hint {
     }
 
     for (ast.rootDecls()) |node| {
-        try maybeCollectVarDeclTypeHint(gpa, ast, node, &out);
+        try maybeCollectVarDeclTypeHint(gpa, ast, node, &out, resolveInitType, resolve_ctx);
         if (ast.nodeTag(node) != .fn_decl) continue;
         const body_node = (ast.nodeData(node).node_and_node)[1];
         var buf: [2]Ast.Node.Index = undefined;
         const stmts = ast.blockStatements(&buf, body_node) orelse continue;
-        for (stmts) |stmt| try maybeCollectVarDeclTypeHint(gpa, ast, stmt, &out);
+        for (stmts) |stmt| try maybeCollectVarDeclTypeHint(gpa, ast, stmt, &out, resolveInitType, resolve_ctx);
     }
 
     return out.toOwnedSlice(gpa);
 }
 
-fn maybeCollectVarDeclTypeHint(gpa: std.mem.Allocator, ast: Ast, node: Ast.Node.Index, out: *std.ArrayList(Hint)) !void {
+fn maybeCollectVarDeclTypeHint(
+    gpa: std.mem.Allocator,
+    ast: Ast,
+    node: Ast.Node.Index,
+    out: *std.ArrayList(Hint),
+    resolveInitType: ?*const fn (ctx: *anyopaque, init_node: Ast.Node.Index) ?[]const u8,
+    resolve_ctx: ?*anyopaque,
+) !void {
     switch (ast.nodeTag(node)) {
         .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {},
         else => return,
@@ -67,7 +87,9 @@ fn maybeCollectVarDeclTypeHint(gpa: std.mem.Allocator, ast: Ast, node: Ast.Node.
     const var_decl = ast.fullVarDecl(node) orelse return;
     if (var_decl.ast.type_node.unwrap() != null) return; // already annotated
     const init_node = var_decl.ast.init_node.unwrap() orelse return;
-    const label = (try inferredTypeLabel(gpa, ast, init_node)) orelse return;
+    const label = (try inferredTypeLabel(gpa, ast, init_node)) orelse
+        (if (resolveInitType) |f| f(resolve_ctx.?, init_node) else null) orelse
+        return;
     errdefer gpa.free(label);
 
     const name_token = var_decl.ast.mut_token + 1;
@@ -82,11 +104,30 @@ fn maybeCollectVarDeclTypeHint(gpa: std.mem.Allocator, ast: Ast, node: Ast.Node.
 /// Owned type-annotation text (e.g. `": *const [5:0]u8"`), or `null` when
 /// `init_node` isn't a literal kind this module infers the type of.
 fn inferredTypeLabel(gpa: std.mem.Allocator, ast: Ast, init_node: Ast.Node.Index) !?[]u8 {
-    if (ast.nodeTag(init_node) != .string_literal) return null;
-    const raw = ast.tokenSlice(ast.nodeMainToken(init_node));
-    const decoded = std.zig.string_literal.parseAlloc(gpa, raw) catch return null;
-    defer gpa.free(decoded);
-    return try std.fmt.allocPrint(gpa, ": *const [{d}:0]u8", .{decoded.len});
+    switch (ast.nodeTag(init_node)) {
+        .string_literal => {
+            const raw = ast.tokenSlice(ast.nodeMainToken(init_node));
+            const decoded = std.zig.string_literal.parseAlloc(gpa, raw) catch return null;
+            defer gpa.free(decoded);
+            return try std.fmt.allocPrint(gpa, ": *const [{d}:0]u8", .{decoded.len});
+        },
+        .number_literal => {
+            const raw = ast.tokenSlice(ast.nodeMainToken(init_node));
+            if (std.mem.indexOfScalar(u8, raw, '.')) |_| {
+                return try gpa.dupe(u8, ": comptime_float");
+            }
+            return try gpa.dupe(u8, ": comptime_int");
+        },
+        .char_literal => return try gpa.dupe(u8, ": u8"),
+        .identifier => {
+            const name = ast.tokenSlice(ast.nodeMainToken(init_node));
+            if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false")) {
+                return try gpa.dupe(u8, ": bool");
+            }
+            return null;
+        },
+        else => return null,
+    }
 }
 
 /// Extracts parameter names from a function's signature source
@@ -210,16 +251,19 @@ pub fn collect(
             }
         }
 
-        // Build-style: single `.{}` arg — prefer field-name hints over `options:`.
+        // Build-style: single `.{}` arg — prefer field-name hints over a lone
+        // `options:` label. Other single-arg calls still go through param
+        // naming below (so `b.foo("x")` can show `name:` after skipping self).
+        const call_offset = ast.tokenStart(callee_token);
+        const fa = resolve.fieldAccessAtToken(ast, callee_token);
+
         if (options.exclude_single_argument and arg_starts.items.len == 1) {
             if (isStructLiteralStart(ast, arg_starts.items[0].start)) {
                 try appendStructLiteralFieldNameHints(gpa, ast, &out, arg_starts.items[0].start, arg_starts.items[0].end);
+                continue;
             }
-            continue;
         }
 
-        const call_offset = ast.tokenStart(callee_token);
-        const fa = resolve.fieldAccessAtToken(ast, callee_token);
         const signature = if (fa) |f|
             lookupSignature(lookup_ctx, f.base, f.field, call_offset)
         else
@@ -233,9 +277,23 @@ pub fn collect(
         }
         if (names.len == 0) continue;
 
+        // Method call `base.method(args…)`: the first signature param is the
+        // receiver (`b` / `self`) and is not written at the call site.
+        // Detect via arity: N call args ↔ N+1 signature params.
+        const skip_self = fa != null and arg_starts.items.len + 1 == names.len;
+        const name_off: usize = if (skip_self) 1 else 0;
+
+        // Bare function with a single argument: still suppress the param name
+        // (`foo(x)` → no `x:`). Method calls that still have one visible arg
+        // after skipping self (`b.foo("x")`) should show that arg's name.
+        if (options.exclude_single_argument and arg_starts.items.len == 1 and !skip_self) {
+            continue;
+        }
+
         for (arg_starts.items, 0..) |arg, arg_i| {
-            if (arg_i >= names.len) break;
-            try maybeAppendHint(gpa, ast, &out, arg.start, arg.end, names[arg_i]);
+            const ni = arg_i + name_off;
+            if (ni >= names.len) break;
+            try maybeAppendHint(gpa, ast, &out, arg.start, arg.end, names[ni]);
         }
     }
 
@@ -405,4 +463,30 @@ test "collect emits field-name hints for single struct-literal arg" {
     try testing.expect(hints.len >= 2);
     try testing.expectEqualStrings("name: ", hints[0].label);
     try testing.expectEqualStrings("root_module: ", hints[1].label);
+}
+
+fn dependencyLookupSig(_: *anyopaque, _: ?[]const u8, _: []const u8, _: u32) ?[]const u8 {
+    return "pub fn dependency(b: *Build, name: []const u8, args: anytype) *Dependency";
+}
+
+test "collect skips method receiver param on field-access calls" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa,
+        \\fn build(b: *Build) void {
+        \\    _ = b.dependency("toml", .{});
+        \\}
+        \\
+    , .zig);
+    defer ast.deinit(gpa);
+
+    var tree = try item_tree_mod.build(gpa, ast);
+    defer tree.deinit(gpa);
+
+    var dummy: u8 = 0;
+    const hints = try collect(gpa, ast, tree, dependencyLookupSig, &dummy, .{ .exclude_single_argument = true });
+    defer freeHints(gpa, hints);
+
+    try testing.expectEqual(@as(usize, 2), hints.len);
+    try testing.expectEqualStrings("name: ", hints[0].label);
+    try testing.expectEqualStrings("args: ", hints[1].label);
 }

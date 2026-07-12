@@ -62,6 +62,109 @@ pub fn identifierTokenAt(ast: Ast, offset: u32) ?Ast.TokenIndex {
     return null;
 }
 
+/// Like `identifierTokenAt`, but for `.builtin` tokens (`@This`, `@import`, …).
+pub fn builtinTokenAt(ast: Ast, offset: u32) ?Ast.TokenIndex {
+    var idx: Ast.TokenIndex = 0;
+    while (idx < ast.tokens.len) : (idx += 1) {
+        if (ast.tokenTag(idx) != .builtin) continue;
+        const start = ast.tokenStart(idx);
+        const end = start + ast.tokenSlice(idx).len;
+        if (offset >= start and offset < end) return idx;
+    }
+    return null;
+}
+
+/// Innermost `struct`/`enum`/`union`/`opaque` whose source range contains
+/// `offset`, plus the named `const`/`var` that owns it when nested.
+/// `container_node == null` means the file/`@This()` root container.
+pub const EnclosingContainer = struct {
+    container_node: ?Ast.Node.Index = null,
+    owner_node: ?Ast.Node.Index = null,
+    owner_name: ?[]const u8 = null,
+};
+
+pub fn enclosingContainerAt(ast: Ast, offset: u32) EnclosingContainer {
+    var best: EnclosingContainer = .{};
+    var best_span: u32 = std.math.maxInt(u32);
+    for (ast.rootDecls()) |node| {
+        walkEnclosingContainer(ast, node, offset, null, null, &best, &best_span);
+    }
+    return best;
+}
+
+fn walkEnclosingContainer(
+    ast: Ast,
+    node: Ast.Node.Index,
+    offset: u32,
+    owner_node: ?Ast.Node.Index,
+    owner_name: ?[]const u8,
+    best: *EnclosingContainer,
+    best_span: *u32,
+) void {
+    const tag = ast.nodeTag(node);
+    if (isContainerDeclTag(tag)) {
+        const start = ast.tokenStart(ast.firstToken(node));
+        const end: u32 = @intCast(start + ast.getNodeSource(node).len);
+        if (offset >= start and offset < end) {
+            const span = end - start;
+            if (span <= best_span.*) {
+                best_span.* = span;
+                best.* = .{
+                    .container_node = node,
+                    .owner_node = owner_node,
+                    .owner_name = owner_name,
+                };
+            }
+        }
+        var buf: [2]Ast.Node.Index = undefined;
+        if (ast.fullContainerDecl(&buf, node)) |decl| {
+            for (decl.ast.members) |member| {
+                walkEnclosingContainer(ast, member, offset, owner_node, owner_name, best, best_span);
+            }
+        }
+        return;
+    }
+
+    switch (tag) {
+        .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
+            const var_decl = ast.fullVarDecl(node) orelse return;
+            const name_token = var_decl.ast.mut_token + 1;
+            const name = ast.tokenSlice(name_token);
+            if (var_decl.ast.init_node.unwrap()) |init| {
+                walkEnclosingContainer(ast, init, offset, node, name, best, best_span);
+            }
+            if (var_decl.ast.type_node.unwrap()) |tn| {
+                walkEnclosingContainer(ast, tn, offset, owner_node, owner_name, best, best_span);
+            }
+        },
+        .fn_decl => {
+            _, const body = ast.nodeData(node).node_and_node;
+            walkEnclosingContainer(ast, body, offset, owner_node, owner_name, best, best_span);
+        },
+        .block, .block_semicolon, .block_two, .block_two_semicolon => {
+            var buf: [2]Ast.Node.Index = undefined;
+            const stmts = ast.blockStatements(&buf, node) orelse return;
+            for (stmts) |stmt| {
+                walkEnclosingContainer(ast, stmt, offset, owner_node, owner_name, best, best_span);
+            }
+        },
+        else => {},
+    }
+}
+
+fn isContainerDeclTag(tag: Ast.Node.Tag) bool {
+    return switch (tag) {
+        .container_decl,
+        .container_decl_trailing,
+        .container_decl_two,
+        .container_decl_two_trailing,
+        .container_decl_arg,
+        .container_decl_arg_trailing,
+        => true,
+        else => false,
+    };
+}
+
 fn definitionAt(ast: Ast, token: Ast.TokenIndex, signature: []const u8) Definition {
     const loc = ast.tokenLocation(0, token);
     return .{

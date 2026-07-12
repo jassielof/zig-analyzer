@@ -37,6 +37,28 @@ pub fn getContainerDocComments(allocator: std.mem.Allocator, tree: Ast) error{Ou
     return try collectDocComments(allocator, tree, 0, true);
 }
 
+/// `//!` docs for a container node: file root uses token 0; nested
+/// `struct`/`enum`/… uses `//!` tokens immediately after the `{`.
+pub fn getContainerDocCommentsForNode(
+    allocator: std.mem.Allocator,
+    tree: Ast,
+    container_node: ?Ast.Node.Index,
+) error{OutOfMemory}!?[]const u8 {
+    if (container_node == null) return try getContainerDocComments(allocator, tree);
+
+    var buf: [2]Ast.Node.Index = undefined;
+    const decl = tree.fullContainerDecl(&buf, container_node.?) orelse return null;
+    // First token after `{` may be a run of `//!` comments.
+    const lbrace = decl.ast.main_token; // often `struct`/`enum`; find `{`
+    var idx = lbrace;
+    while (idx < tree.tokens.len and tree.tokenTag(idx) != .l_brace) : (idx += 1) {}
+    if (idx >= tree.tokens.len) return null;
+    idx += 1;
+    if (idx >= tree.tokens.len) return null;
+    if (tree.tokenTag(idx) != .container_doc_comment) return null;
+    return try collectDocComments(allocator, tree, idx, true);
+}
+
 pub fn getDocCommentsBeforeToken(allocator: std.mem.Allocator, tree: Ast, base: Ast.TokenIndex) error{OutOfMemory}!?[]const u8 {
     const doc_comment_index = getDocCommentTokenIndex(tree, base) orelse return null;
     return try collectDocComments(allocator, tree, doc_comment_index, false);
@@ -169,6 +191,33 @@ test "getContainerDocComments joins //! lines" {
     const docs = (try getContainerDocComments(gpa, ast)).?;
     defer gpa.free(docs);
     try testing.expectEqualStrings("String formatting.\nAnd parsing.", docs);
+}
+
+test "getContainerDocCommentsForNode reads nested struct //! docs" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa,
+        \\//! File docs.
+        \\
+        \\const Foo = struct {
+        \\    //! Foo container docs.
+        \\    x: u8,
+        \\};
+        \\
+    , .zig);
+    defer ast.deinit(gpa);
+
+    const foo_init = blk: {
+        for (ast.rootDecls()) |node| {
+            const var_decl = ast.fullVarDecl(node) orelse continue;
+            if (!std.mem.eql(u8, ast.tokenSlice(var_decl.ast.mut_token + 1), "Foo")) continue;
+            break :blk var_decl.ast.init_node.unwrap().?;
+        }
+        unreachable;
+    };
+
+    const docs = (try getContainerDocCommentsForNode(gpa, ast, foo_init)).?;
+    defer gpa.free(docs);
+    try testing.expectEqualStrings("Foo container docs.", docs);
 }
 
 test "getDocCommentsForRootName returns null without docs" {

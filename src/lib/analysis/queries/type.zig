@@ -129,10 +129,17 @@ pub const Type = struct {
                 break :blk buf[0 .. 1 + inner.len];
             },
             .error_union => |c| c.stringify(buf),
-            .function => |f| f.signature,
-            .container => |c| if (c.name.len > 0) c.name else c.uri,
+            .function => |f| f.name,
+            .container => |c| if (c.name.len > 0) c.name else "struct",
             .unknown => "unknown",
         };
+    }
+
+    /// Owned `Type` display string (e.g. `*Module`). Caller frees.
+    pub fn allocStringify(self: Type, gpa: std.mem.Allocator) ![]u8 {
+        var buf: [256]u8 = undefined;
+        const s = self.stringify(&buf);
+        return try gpa.dupe(u8, s);
     }
 };
 

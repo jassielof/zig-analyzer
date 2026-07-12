@@ -71,6 +71,9 @@ pub const Server = struct {
     zig_global_cache_dir: ?[]const u8 = null,
     /// Path-based packages from workspace `build.zig.zon` files. Owned keys/values.
     packages: packages_mod.PackageMap = .empty,
+    /// Whether any workspace root currently has a `build.zig` (build-script
+    /// mode). False means freestanding: relative/`std` imports only.
+    workspace_has_build_zig: bool = false,
     /// Inlay hint settings (mirrored from VS Code `zigAnalyzer.inlayHints.*`).
     inlay_hints_enable: bool = true,
     inlay_hints_parameter_names: bool = true,
@@ -400,11 +403,15 @@ pub const Server = struct {
         root_uri: ?[]const u8,
     ) void {
         packages_mod.clearPackages(self.gpa, &self.packages);
+        self.workspace_has_build_zig = false;
 
         if (folders) |list| {
             for (list) |folder| {
                 const path = uri_util.toFsPath(self.gpa, folder.uri) catch continue;
                 defer self.gpa.free(path);
+                const mode = packages_mod.detectWorkspaceMode(self.io, path);
+                if (mode == .build_script) self.workspace_has_build_zig = true;
+                if (mode == .freestanding) continue;
                 packages_mod.loadDepsFromWorkspace(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages) catch |err| {
                     std.log.err("failed to load path deps from {s}: {t}", .{ path, err });
                 };
@@ -415,6 +422,9 @@ pub const Server = struct {
         if (root_uri) |uri| {
             const path = uri_util.toFsPath(self.gpa, uri) catch return;
             defer self.gpa.free(path);
+            const mode = packages_mod.detectWorkspaceMode(self.io, path);
+            if (mode == .build_script) self.workspace_has_build_zig = true;
+            if (mode == .freestanding) return;
             packages_mod.loadDepsFromWorkspace(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages) catch |err| {
                 std.log.err("failed to load path deps from {s}: {t}", .{ path, err });
             };
@@ -424,12 +434,15 @@ pub const Server = struct {
     /// If packages aren't loaded yet (e.g. initialize had no workspace
     /// folders), discover them by walking up from this file's directory.
     fn ensurePackagesForUri(self: *Server, uri: []const u8) void {
-        if (self.packages.count() > 0) return;
+        if (self.packages.count() > 0 or self.workspace_has_build_zig) return;
         const path = uri_util.toFsPath(self.gpa, uri) catch return;
         defer self.gpa.free(path);
-        packages_mod.loadDepsWalkingUpFromFile(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages) catch |err| {
+        if (packages_mod.loadDepsWalkingUpFromFile(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages)) |_| {
+            self.workspace_has_build_zig = self.packages.count() > 0 or
+                packages_mod.fileHasAncestorBuildZig(self.io, path);
+        } else |err| {
             std.log.err("failed to load packages near {s}: {t}", .{ path, err });
-        };
+        }
     }
 
     fn handleInitialized(self: *Server, msg: jsonrpc.Message) void {
@@ -828,6 +841,21 @@ pub const Server = struct {
             return;
         }
 
+        // `@This()` → enclosing container docs (file `//!` or nested struct).
+        if (try self.hoverForThis(uri, position)) |hover| {
+            defer self.gpa.free(hover.value);
+            const HoverContents = struct { kind: []const u8 = "markdown", value: []const u8 };
+            const HoverResult = struct {
+                contents: HoverContents,
+                range: Range,
+            };
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, HoverResult{
+                .contents = .{ .value = hover.value },
+                .range = hover.range,
+            });
+            return;
+        }
+
         const any = try self.resolveRequestPosition(uri, position) orelse {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
@@ -887,6 +915,43 @@ pub const Server = struct {
     }
 
     const HoverPayload = struct { value: []u8, range: Range };
+
+    fn hoverForThis(self: *Server, uri: []const u8, position: Position) !?HoverPayload {
+        const doc = self.documents.get(uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const tok = resolve.builtinTokenAt(parsed_file.ast, offset) orelse return null;
+        if (!std.mem.eql(u8, parsed_file.ast.tokenSlice(tok), "@This")) return null;
+
+        const enc = resolve.enclosingContainerAt(parsed_file.ast, offset);
+        var docs: ?[]const u8 = null;
+        defer if (docs) |d| self.gpa.free(d);
+
+        docs = try doc_comments.getContainerDocCommentsForNode(self.gpa, parsed_file.ast, enc.container_node);
+        // Nested named struct without `//!`: fall back to `///` on `const Foo`.
+        if (docs == null) {
+            if (enc.owner_node) |owner| {
+                docs = try doc_comments.getDocComments(self.gpa, parsed_file.ast, owner);
+            }
+        }
+
+        const signature = if (enc.owner_name) |n|
+            try std.fmt.allocPrint(self.gpa, "{s}", .{n})
+        else
+            try self.gpa.dupe(u8, "@This()");
+        defer self.gpa.free(signature);
+
+        const value = try formatHoverMarkdown(self.gpa, signature, docs, null);
+        const loc = parsed_file.ast.tokenLocation(0, tok);
+        const token_len = parsed_file.ast.tokenSlice(tok).len;
+        return .{
+            .value = value,
+            .range = .{
+                .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
+                .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + token_len) },
+            },
+        };
+    }
 
     fn hoverForImportString(self: *Server, uri: []const u8, position: Position) !?HoverPayload {
         const doc = self.documents.get(uri) orelse return null;
@@ -1114,6 +1179,11 @@ pub const Server = struct {
         const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
         const pos: resolve.Position = .{ .line = position.line, .character = position.character };
 
+        // `@This()` → enclosing container (file root or nested named struct).
+        if (try self.resolveThisAt(uri, parsed_file.ast, pos)) |def| {
+            return def;
+        }
+
         if (resolve.resolveAt(parsed_file.ast, tree.*, pos)) |def| {
             return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
         }
@@ -1134,6 +1204,42 @@ pub const Server = struct {
             }
         }
         return null;
+    }
+
+    fn resolveThisAt(self: *Server, uri: []const u8, ast: Ast, pos: resolve.Position) !?AnyDefinition {
+        const offset = resolve.positionToOffset(ast.source, pos);
+        const tok = resolve.builtinTokenAt(ast, offset) orelse return null;
+        if (!std.mem.eql(u8, ast.tokenSlice(tok), "@This")) return null;
+
+        const enc = resolve.enclosingContainerAt(ast, offset);
+        if (enc.owner_node) |owner| {
+            const var_decl = ast.fullVarDecl(owner) orelse return null;
+            const name_token = var_decl.ast.mut_token + 1;
+            const loc = ast.tokenLocation(0, name_token);
+            const name = ast.tokenSlice(name_token);
+            return .{
+                .uri = try self.gpa.dupe(u8, uri),
+                .def = .{
+                    .line = @intCast(loc.line),
+                    .character = @intCast(loc.column),
+                    .end_character = @intCast(loc.column + name.len),
+                    .signature = try self.gpa.dupe(u8, name),
+                },
+                .signature_owned = true,
+            };
+        }
+
+        // File-level `@This()` → start of file / container docs.
+        return .{
+            .uri = try self.gpa.dupe(u8, uri),
+            .def = .{
+                .line = 0,
+                .character = 0,
+                .end_character = 0,
+                .signature = try self.gpa.dupe(u8, "@This()"),
+            },
+            .signature_owned = true,
+        };
     }
 
     /// Request-local scratch for typed resolution (keeps disk ASTs alive).
@@ -1975,7 +2081,20 @@ pub const Server = struct {
         }
 
         if (self.inlay_hints_types) {
-            type_hints = try inlay_hints.collectTypeHints(self.gpa, parsed_file.ast);
+            var type_scratch: TypeScratch = .{ .server = self };
+            defer type_scratch.deinit();
+            var scopes = try scope_mod.build(self.gpa, parsed_file.ast);
+            defer scopes.deinit();
+            var expr_ctx = self.makeExprContext(&type_scratch, uri, parsed_file.ast, scopes);
+            defer expr_ctx.deinitScratch();
+
+            var infer_ctx: TypeInferCtx = .{ .server = self, .expr = &expr_ctx };
+            type_hints = try inlay_hints.collectTypeHintsWithResolver(
+                self.gpa,
+                parsed_file.ast,
+                inferInitTypeLabel,
+                &infer_ctx,
+            );
 
             for (type_hints) |h| {
                 if (h.line < parsed.value.range.start.line) continue;
@@ -1989,6 +2108,23 @@ pub const Server = struct {
         }
 
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, results.items);
+    }
+
+    const TypeInferCtx = struct {
+        server: *Server,
+        expr: *resolve_expr.Context,
+    };
+
+    fn inferInitTypeLabel(ctx_ptr: *anyopaque, init_node: Ast.Node.Index) ?[]const u8 {
+        const ctx: *TypeInferCtx = @ptrCast(@alignCast(ctx_ptr));
+        const ty = (resolve_expr.resolveValueType(ctx.expr, init_node) catch return null) orelse return null;
+        if (ty.data == .unknown) return null;
+        // Skip weak/unhelpful labels.
+        if (ty.data == .container and ty.data.container.name.len == 0) return null;
+        const rendered = ty.allocStringify(ctx.server.gpa) catch return null;
+        defer ctx.server.gpa.free(rendered);
+        if (rendered.len == 0 or std.mem.eql(u8, rendered, "unknown")) return null;
+        return std.fmt.allocPrint(ctx.server.gpa, ": {s}", .{rendered}) catch null;
     }
 };
 
@@ -2904,9 +3040,18 @@ test "textDocument/inlayHint suppresses a hint when the argument is already name
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
     defer parsed.deinit();
     const hints = parsed.value.object.get("result").?.array.items;
-    // Only "extra: " — "tree: " would just repeat the local's own name.
-    try std.testing.expectEqual(@as(usize, 1), hints.len);
-    try std.testing.expectEqualStrings("extra: ", hints[0].object.get("label").?.string);
+    // Param "tree: " suppressed (arg already named tree); type inlay on
+    // `const tree = 1`; param "extra: " on the second arg.
+    try std.testing.expectEqual(@as(usize, 2), hints.len);
+    var saw_extra = false;
+    var saw_type = false;
+    for (hints) |h| {
+        const label = h.object.get("label").?.string;
+        if (std.mem.eql(u8, label, "extra: ")) saw_extra = true;
+        if (std.mem.eql(u8, label, ": comptime_int")) saw_type = true;
+    }
+    try std.testing.expect(saw_extra);
+    try std.testing.expect(saw_type);
 }
 
 test "unused import is published with the Unnecessary diagnostic tag" {
