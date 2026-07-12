@@ -4,11 +4,24 @@
     {
       "label": "build zig-analyzer",
       "type": "process",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
       "command": "zig",
+      "icon": {"id": "build"},
       "args": ["build"],
+      "group": "build",
+      "problemMatcher": []
+    },
+     {
+      "label": "build extension",
+      "icon": {"id": "build"},
+      "type": "process",
+      "command":"pnpm",
+      "args": ["build"],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "build zig-analyzer and extension",
+      "dependsOn": ["build zig-analyzer", "build extension"],
       "group": "build",
       "problemMatcher": []
     }

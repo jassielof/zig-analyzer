@@ -169,6 +169,130 @@ pub fn importAtOffset(imports_list: []const Import, ast: Ast, offset: u32) ?Impo
     return null;
 }
 
+/// Detects whether `offset` sits inside the string-literal argument of an
+/// `@import(` call, returning the raw text typed so far (unquoted). Token-
+/// based rather than AST-node-based, so it works for the still-
+/// unterminated string a completion request fires against mid-typing
+/// (`@import("st|` — no closing quote yet), which the tokenizer emits as
+/// `.invalid` rather than `.string_literal` (see `Tokenizer.state.string_literal`
+/// in the standard library: unterminated strings become `.invalid` at
+/// end-of-line/EOF, not a different flavor of string token).
+pub fn importStringPrefixAt(ast: Ast, offset: u32) ?[]const u8 {
+    var idx: Ast.TokenIndex = 0;
+    while (idx < ast.tokens.len) : (idx += 1) {
+        const tag = ast.tokenTag(idx);
+        if (tag != .string_literal and tag != .invalid) continue;
+
+        const start = ast.tokenStart(idx);
+        const slice = ast.tokenSlice(idx);
+        if (slice.len == 0 or slice[0] != '"') continue; // not a string token
+        const end = start + slice.len;
+        if (offset < start or offset > end) continue;
+
+        if (idx < 2) return null;
+        if (ast.tokenTag(idx - 1) != .l_paren) return null;
+        if (ast.tokenTag(idx - 2) != .builtin) return null;
+        if (!std.mem.eql(u8, ast.tokenSlice(idx - 2), "@import")) return null;
+
+        const content_start = start + 1; // past the opening quote
+        if (offset <= content_start) return "";
+        // A closing quote, if typed already, ends the content early.
+        const has_closing_quote = slice.len >= 2 and slice[slice.len - 1] == '"';
+        const content_end_max = if (has_closing_quote) end - 1 else end;
+        const content_end = @min(offset, content_end_max);
+        if (content_end <= content_start) return "";
+        return ast.source[content_start..content_end];
+    }
+    return null;
+}
+
+pub const ImportCompletion = struct {
+    /// Owned. Text to insert in place of the typed prefix — a bare name
+    /// (`"std"`, a package name) or a path segment (`"helpers.zig"`,
+    /// `"sub/"` for a directory, trailing slash included so triggering
+    /// completion again immediately lists that directory's contents).
+    label: []const u8,
+    is_directory: bool,
+};
+
+pub fn freeImportCompletions(gpa: std.mem.Allocator, items: []const ImportCompletion) void {
+    for (items) |c| gpa.free(c.label);
+    gpa.free(items);
+}
+
+/// Suggests completions for the partial text inside an `@import("` string:
+/// `"std"` (when `zig_lib_dir` is known), named packages from `packages`
+/// (`build.zig.zon` path/URL dependencies), and relative `.zig`
+/// files/subdirectories under `importer_uri`'s own directory. `prefix` is
+/// `importStringPrefixAt`'s output — raw, unquoted, possibly containing
+/// `/` for a path already partially typed.
+pub fn collectImportCompletions(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    importer_uri: []const u8,
+    prefix: []const u8,
+    zig_lib_dir: ?[]const u8,
+    packages: ?*const PackageMap,
+) ![]ImportCompletion {
+    var out: std.ArrayList(ImportCompletion) = .empty;
+    errdefer {
+        for (out.items) |c| gpa.free(c.label);
+        out.deinit(gpa);
+    }
+
+    // "std" and named packages are single-segment names, not paths — only
+    // offer them before the first `/` of the typed prefix.
+    if (std.mem.indexOfScalar(u8, prefix, '/') == null) {
+        if (zig_lib_dir != null and std.mem.startsWith(u8, "std", prefix)) {
+            try out.append(gpa, .{ .label = try gpa.dupe(u8, "std"), .is_directory = false });
+        }
+        if (packages) |map| {
+            var it = map.iterator();
+            while (it.next()) |entry| {
+                if (!std.mem.startsWith(u8, entry.key_ptr.*, prefix)) continue;
+                try out.append(gpa, .{ .label = try gpa.dupe(u8, entry.key_ptr.*), .is_directory = false });
+            }
+        }
+    }
+
+    // Relative filesystem entries: split `prefix` into the already-typed
+    // subdirectory portion and the base-name filter for the final segment.
+    const importer_path = uri_util.toFsPath(gpa, importer_uri) catch return try out.toOwnedSlice(gpa);
+    defer gpa.free(importer_path);
+    const importer_dir = std.fs.path.dirname(importer_path) orelse importer_path;
+
+    const last_slash = std.mem.lastIndexOfScalar(u8, prefix, '/');
+    const sub_dir = if (last_slash) |i| prefix[0..i] else "";
+    const base_filter = if (last_slash) |i| prefix[i + 1 ..] else prefix;
+
+    const list_dir_path = if (sub_dir.len == 0)
+        try gpa.dupe(u8, importer_dir)
+    else
+        try std.fs.path.join(gpa, &.{ importer_dir, sub_dir });
+    defer gpa.free(list_dir_path);
+
+    var dir = std.Io.Dir.cwd().openDir(io, list_dir_path, .{ .iterate = true }) catch return try out.toOwnedSlice(gpa);
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, base_filter)) continue;
+        switch (entry.kind) {
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+                try out.append(gpa, .{ .label = try gpa.dupe(u8, entry.name), .is_directory = false });
+            },
+            .directory => {
+                const with_slash = try std.fmt.allocPrint(gpa, "{s}/", .{entry.name});
+                try out.append(gpa, .{ .label = with_slash, .is_directory = true });
+            },
+            else => {},
+        }
+    }
+
+    return try out.toOwnedSlice(gpa);
+}
+
 const testing = std.testing;
 
 test "resolveImportUri: sibling file in the same directory" {
@@ -252,4 +376,98 @@ test "rootDeclImportPath finds re-export imports" {
     const path = (try rootDeclImportPath(gpa, ast, "fmt")).?;
     defer gpa.free(path);
     try testing.expectEqualStrings("fmt.zig", path);
+}
+
+test "importStringPrefixAt finds the typed prefix of an unterminated @import string" {
+    const gpa = testing.allocator;
+    // `@import("st` — the string is still unterminated (no closing `"`),
+    // which is exactly the state a completion request fires in mid-typing.
+    var ast = try Ast.parse(gpa, "const x = @import(\"st", .zig);
+    defer ast.deinit(gpa);
+
+    // Offset at the very end of the source, right after "st".
+    const prefix = importStringPrefixAt(ast, @intCast(ast.source.len)).?;
+    try testing.expectEqualStrings("st", prefix);
+}
+
+test "importStringPrefixAt works on an already-closed string too" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "const x = @import(\"std\");\n", .zig);
+    defer ast.deinit(gpa);
+
+    // Cursor right after "st", before the closing quote.
+    const offset: u32 = @intCast(std.mem.indexOf(u8, ast.source, "std").? + 2);
+    const prefix = importStringPrefixAt(ast, offset).?;
+    try testing.expectEqualStrings("st", prefix);
+}
+
+test "importStringPrefixAt returns null outside any @import call" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "const x = \"not an import\";\n", .zig);
+    defer ast.deinit(gpa);
+
+    const offset: u32 = @intCast(std.mem.indexOf(u8, ast.source, "not").?);
+    try testing.expectEqual(@as(?[]const u8, null), importStringPrefixAt(ast, offset));
+}
+
+test "collectImportCompletions suggests std and matching packages" {
+    const gpa = testing.allocator;
+    var packages: PackageMap = .empty;
+    defer {
+        var it = packages.iterator();
+        while (it.next()) |e| {
+            gpa.free(e.key_ptr.*);
+            gpa.free(e.value_ptr.*);
+        }
+        packages.deinit(gpa);
+    }
+    try packages.put(gpa, try gpa.dupe(u8, "stanza"), try gpa.dupe(u8, "file:///proj/deps/stanza/root.zig"));
+    try packages.put(gpa, try gpa.dupe(u8, "known_folders"), try gpa.dupe(u8, "file:///proj/deps/known_folders/root.zig"));
+
+    // A nonexistent importer directory: filesystem listing no-ops, but
+    // std/package suggestions (which don't touch disk) still work.
+    const items = try collectImportCompletions(gpa, testing.io, "file:///does/not/exist/main.zig", "st", "/opt/zig/lib", &packages);
+    defer freeImportCompletions(gpa, items);
+
+    var found_std = false;
+    var found_stanza = false;
+    for (items) |item| {
+        if (std.mem.eql(u8, item.label, "std")) found_std = true;
+        if (std.mem.eql(u8, item.label, "stanza")) found_stanza = true;
+        try testing.expect(!std.mem.eql(u8, item.label, "known_folders")); // doesn't match "st" prefix
+    }
+    try testing.expect(found_std);
+    try testing.expect(found_stanza);
+}
+
+test "collectImportCompletions lists sibling .zig files and subdirectories" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    (tmp.dir.createFile(testing.io, "helpers.zig", .{}) catch unreachable).close(testing.io);
+    (tmp.dir.createFile(testing.io, "notes.txt", .{}) catch unreachable).close(testing.io);
+    try tmp.dir.createDir(testing.io, "sub", .default_dir);
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &path_buf);
+    const abs_dir = path_buf[0..len];
+
+    const importer_path = try std.fs.path.join(gpa, &.{ abs_dir, "main.zig" });
+    defer gpa.free(importer_path);
+    const importer_uri = try @import("../../uri.zig").fromPath(gpa, importer_path);
+    defer gpa.free(importer_uri);
+
+    const items = try collectImportCompletions(gpa, testing.io, importer_uri, "", null, null);
+    defer freeImportCompletions(gpa, items);
+
+    var found_helpers = false;
+    var found_sub = false;
+    for (items) |item| {
+        if (std.mem.eql(u8, item.label, "helpers.zig")) found_helpers = true;
+        if (std.mem.eql(u8, item.label, "sub/")) found_sub = true;
+        try testing.expect(!std.mem.eql(u8, item.label, "notes.txt")); // not .zig, not a dir
+    }
+    try testing.expect(found_helpers);
+    try testing.expect(found_sub);
 }

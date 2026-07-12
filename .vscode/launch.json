@@ -12,7 +12,7 @@
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
       ],
-      "preLaunchTask": "build zig-analyzer",
+      "preLaunchTask": "build zig-analyzer and extension",
       "env": {
         "PATH": "${workspaceFolder}/zig-out/bin;${env:PATH}"
       }

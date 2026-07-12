@@ -1,8 +1,7 @@
 // Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) rather than auto-downloaded/managed; see project plan §5.
 
-// TODO: On the manfiest dependencies (build.zig.zon), it should be able to fetch the version of the dependency and show it, this mainly for path-based dependencies, url-based ones are excluded as needs more work at the moment. Ideally, for URL/Git-based dependencies we could also achieve it, since these are also locally cached under the new `zig-pkg` cache dir.
-
 import { execFile } from "node:child_process";
+import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import {
@@ -12,24 +11,34 @@ import {
   TransportKind,
 } from "vscode-languageclient/node";
 import { ZigBuildCodeLensProvider } from "./buildCodeLenses";
+import { ZonCodeLensProvider } from "./zonCodeLenses";
 
 const execFileAsync = promisify(execFile);
 
 let client: LanguageClient | undefined;
 let codeLensProvider: ZigBuildCodeLensProvider | undefined;
+let zonCodeLensProvider: ZonCodeLensProvider | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   codeLensProvider = new ZigBuildCodeLensProvider();
+  zonCodeLensProvider = new ZonCodeLensProvider(getZigPath);
 
   context.subscriptions.push(
     codeLensProvider,
+    zonCodeLensProvider,
     vscode.languages.registerCodeLensProvider(
       [{ language: "zig", scheme: "file" }],
       codeLensProvider,
     ),
+    vscode.languages.registerCodeLensProvider(
+      [{ language: "zon", scheme: "file", pattern: "**/build.zig.zon" }],
+      zonCodeLensProvider,
+    ),
     vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (doc.uri.scheme === "file" && doc.uri.fsPath.endsWith("build.zig")) {
-        codeLensProvider?.refresh();
+      if (doc.uri.scheme !== "file") return;
+      if (doc.uri.fsPath.endsWith("build.zig")) codeLensProvider?.refresh();
+      if (path.basename(doc.uri.fsPath) === "build.zig.zon") {
+        zonCodeLensProvider?.refresh();
       }
     }),
     vscode.commands.registerCommand("zigAnalyzer.restart", () => restart()),
@@ -58,6 +67,9 @@ export function activate(context: vscode.ExtensionContext): void {
             inlayHints: getInlayHintsConfig(),
           },
         });
+      }
+      if (e.affectsConfiguration("zigAnalyzer.zigPath")) {
+        zonCodeLensProvider?.refresh(); // the cached global package cache dir came from the old zigPath
       }
     }),
   );

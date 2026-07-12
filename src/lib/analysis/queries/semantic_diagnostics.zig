@@ -217,6 +217,13 @@ fn checkUnusedImports(gpa: std.mem.Allocator, ast: Ast, out: *std.ArrayList(Diag
         const name = ast.tokenSlice(name_token);
         if (name.len > 0 and name[0] == '_') continue;
 
+        // `pub const foo = @import("foo.zig");` is a re-export: unused in
+        // *this* file doesn't mean unused — other files may import it
+        // through us. Only non-pub import bindings are flagged, matching
+        // `checkUnusedPrivateDecls`'s same rule for functions/consts.
+        const var_decl = ast.fullVarDecl(node) orelse continue;
+        if (var_decl.visib_token != null) continue;
+
         if (!nameUsedElsewhere(ast, name, name_token)) {
             const loc = locationOf(ast, name_token);
             try out.append(gpa, .{
@@ -365,6 +372,16 @@ test "flags an unused import" {
 test "does not flag an import that's used" {
     const gpa = testing.allocator;
     const diags = try checkSource(gpa, "const std = @import(\"std\");\ntest \"t\" {\n    _ = std;\n}\n");
+    defer freeDiagnostics(gpa, diags);
+    try testing.expectEqual(@as(usize, 0), diags.len);
+}
+
+test "does not flag a pub re-export import even if unused in this file" {
+    // `pub const foo = @import("foo.zig");` is a re-export: other files
+    // may import it through this one, so "unused in this file" doesn't
+    // mean unused overall.
+    const gpa = testing.allocator;
+    const diags = try checkSource(gpa, "pub const completions = @import(\"completions.zig\");\n");
     defer freeDiagnostics(gpa, diags);
     try testing.expectEqual(@as(usize, 0), diags.len);
 }

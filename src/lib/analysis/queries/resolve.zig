@@ -178,6 +178,17 @@ pub fn resolveAt(ast: Ast, item_tree: ItemTree, pos: Position) ?Definition {
         break; // found the enclosing function; nothing else to check locally
     }
 
+    // A token that's itself the *field* of a `base.field` access (e.g.
+    // `Shell` in `completions.Shell`) is not a bare top-level reference —
+    // even when its text happens to match some unrelated top-level name
+    // in this file, that match would be a coincidence, not what the
+    // access actually refers to. Returning `null` here (rather than a
+    // wrong same-file match) lets the caller fall through to cross-file
+    // field-access resolution instead, which is what a dotted access
+    // like this actually needs. Matches this module's "safe limitation,
+    // not silently wrong" policy (see file doc comment).
+    if (fieldAccessAtToken(ast, ref_token) != null) return null;
+
     return resolveTopLevel(ast, item_tree, name);
 }
 
@@ -268,6 +279,18 @@ pub fn fieldAccessAt(ast: Ast, pos: Position) ?FieldAccess {
     const offset = positionToOffset(ast.source, pos);
     const field_token = identifierTokenAt(ast, offset) orelse return null;
     return fieldAccessAtToken(ast, field_token);
+}
+
+/// True if `token` is the *base* of a `token.field` access — the mirror
+/// image of `fieldAccessAtToken`, which detects the field side. Go-to-
+/// definition on an import binding used as a namespace (`completions` in
+/// `completions.Shell`) needs to tell the two apart: the base should
+/// resolve to (and stop at) the local binding, while the field should
+/// resolve through it into the imported file.
+pub fn isFieldAccessBase(ast: Ast, token: Ast.TokenIndex) bool {
+    return token + 2 < ast.tokens.len and
+        ast.tokenTag(token + 1) == .period and
+        ast.tokenTag(token + 2) == .identifier;
 }
 
 /// Walks a dotted access leftward from the identifier under `pos`.
@@ -553,6 +576,45 @@ test "findDoctest ignores string-named tests" {
     var ast = try Ast.parse(gpa, "test \"addOne works\" {}\nfn addOne(n: i32) i32 { return n + 1; }\n", .zig);
     defer ast.deinit(gpa);
     try testing.expectEqual(@as(?[]const u8, null), findDoctest(ast, "addOne"));
+}
+
+test "isFieldAccessBase distinguishes the base from the field of a dotted access" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "const x = completions.Shell;\n", .zig);
+    defer ast.deinit(gpa);
+
+    // "completions" is the base; "Shell" is the field; "x" is neither.
+    var idx: Ast.TokenIndex = 0;
+    var x_token: ?Ast.TokenIndex = null;
+    var base_token: ?Ast.TokenIndex = null;
+    var field_token: ?Ast.TokenIndex = null;
+    while (idx < ast.tokens.len) : (idx += 1) {
+        if (ast.tokenTag(idx) != .identifier) continue;
+        if (std.mem.eql(u8, ast.tokenSlice(idx), "x")) x_token = idx;
+        if (std.mem.eql(u8, ast.tokenSlice(idx), "completions")) base_token = idx;
+        if (std.mem.eql(u8, ast.tokenSlice(idx), "Shell")) field_token = idx;
+    }
+
+    try testing.expect(isFieldAccessBase(ast, base_token.?));
+    try testing.expect(!isFieldAccessBase(ast, field_token.?));
+    try testing.expect(!isFieldAccessBase(ast, x_token.?));
+}
+
+test "resolveAt does not mismatch a dotted field against an unrelated same-named top-level item" {
+    // Regression guard: `Shell` here is the *field* of `completions.Shell`,
+    // not a bare reference to the unrelated top-level `Shell` declared
+    // below. Matching it anyway (the bug this test guards against) would
+    // make go-to-definition redirect back to the very line being edited.
+    const gpa = testing.allocator;
+    const source = "const completions = @import(\"completions.zig\");\npub const Shell = completions.Shell;\n";
+    //              "pub const Shell = completions.Shell;" -> field "Shell" starts at character 30
+    var ast = try Ast.parse(gpa, source, .zig);
+    defer ast.deinit(gpa);
+    var tree = try item_tree_query.build(gpa, ast);
+    defer tree.deinit(gpa);
+
+    const def = resolveAt(ast, tree, .{ .line = 1, .character = 30 });
+    try testing.expectEqual(@as(?Definition, null), def);
 }
 
 test "findDoctest returns null when there's no matching test" {

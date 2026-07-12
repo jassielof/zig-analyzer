@@ -289,8 +289,6 @@ pub const Server = struct {
             try self.handleCodeLens(writer, msg);
         } else if (std.mem.eql(u8, msg.method, "textDocument/inlayHint")) {
             try self.handleInlayHint(writer, msg);
-        } else if (std.mem.eql(u8, msg.method, "textDocument/documentLink")) {
-            try self.handleDocumentLink(writer, msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -334,7 +332,13 @@ pub const Server = struct {
                 hoverProvider: bool = true,
                 documentSymbolProvider: bool = true,
                 workspaceSymbolProvider: bool = true,
-                completionProvider: struct {} = .{},
+                completionProvider: struct {
+                    // Fires completion again on '/' so typing a path
+                    // segment (`sub/` inside `@import("sub/`) immediately
+                    // lists that subdirectory, matching how it behaves
+                    // after any other identifier character.
+                    triggerCharacters: []const []const u8 = &.{"/"},
+                } = .{},
                 documentFormattingProvider: bool = true,
                 semanticTokensProvider: struct {
                     legend: struct {
@@ -354,7 +358,6 @@ pub const Server = struct {
                 } = .{},
                 codeLensProvider: struct {} = .{},
                 inlayHintProvider: bool = true,
-                documentLinkProvider: bool = true,
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
@@ -590,7 +593,21 @@ pub const Server = struct {
         };
         defer self.freeAnyDefinition(initial);
 
-        const any = try self.redirectImportBinding(initial.uri, initial.def);
+        // `redirectImportBinding` jumps straight into the imported file —
+        // right for a bare reference to the binding (`completions` on its
+        // own, or its own declaration site), but wrong when the click was
+        // on the *base* of a dotted access (`completions` in
+        // `completions.Shell`): there, `resolveRequestPosition` already
+        // resolved to the local `const completions = @import(...)` line,
+        // and that's where a base-of-a-namespace click should stop —
+        // matching how e.g. Go's tooling treats `pkg.Symbol`. The field
+        // side (`Shell`) is handled separately, by `resolveAt` refusing to
+        // bare-match it (see resolve.zig) so it falls through to
+        // `resolveFieldChain`'s real cross-file resolution instead.
+        const any = if (try self.isFieldAccessBaseAt(uri, position))
+            AnyDefinition{ .uri = try self.gpa.dupe(u8, initial.uri), .def = initial.def }
+        else
+            try self.redirectImportBinding(initial.uri, initial.def);
         defer self.freeAnyDefinition(any);
 
         const LocationResult = struct { uri: []const u8, range: Range };
@@ -601,6 +618,14 @@ pub const Server = struct {
                 .end = .{ .line = any.def.line, .character = any.def.end_character },
             },
         });
+    }
+
+    fn isFieldAccessBaseAt(self: *Server, uri: []const u8, position: Position) !bool {
+        const doc = self.documents.get(uri) orelse return false;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const tok = resolve.identifierTokenAt(parsed_file.ast, offset) orelse return false;
+        return resolve.isFieldAccessBase(parsed_file.ast, tok);
     }
 
     /// If `position` is inside an `@import("...")` string literal on a
@@ -813,10 +838,16 @@ pub const Server = struct {
         const imp = imports.importAtOffset(imports_list, parsed_file.ast, offset) orelse return null;
         const target_uri = imp.uri orelse return null;
 
+        // Excludes the surrounding quote characters — only the path text
+        // itself should be part of the range VS Code underlines on
+        // ctrl+hover, not the quotes around it. Zig string-literal tokens
+        // are always `"..."` (single-line only), so trimming exactly one
+        // character off each end is safe.
         const loc = parsed_file.ast.tokenLocation(0, imp.string_token);
+        const token_len = parsed_file.ast.tokenSlice(imp.string_token).len;
         const range: Range = .{
-            .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
-            .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + parsed_file.ast.tokenSlice(imp.string_token).len) },
+            .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + 1) },
+            .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + token_len - 1) },
         };
 
         const signature = try std.fmt.allocPrint(self.gpa, "@import(\"{s}\")", .{imp.path});
@@ -1227,12 +1258,18 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
+        const uri = parsed.value.textDocument.uri;
+
+        // Inside an `@import("` string, only module/path completions make
+        // sense — keywords and in-scope identifiers would just be noise
+        // (and aren't even syntactically valid there).
+        if (try self.writeImportStringCompletions(writer, msg.id.?, uri, parsed.value.position)) return;
+
         var items: std.ArrayList(CompletionItemResult) = .empty;
         defer items.deinit(self.gpa);
 
         for (keywords) |kw| try items.append(self.gpa, .{ .label = kw, .kind = 14 });
 
-        const uri = parsed.value.textDocument.uri;
         if (self.documents.get(uri)) |doc| {
             const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
             const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
@@ -1252,6 +1289,35 @@ pub const Server = struct {
         }
 
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, items.items);
+    }
+
+    /// If `position` is inside an `@import("` string, writes a completion
+    /// response of path/module suggestions and returns `true` (even when
+    /// there happen to be none — an empty-but-handled result still means
+    /// "don't fall through to keyword/identifier completions"). Returns
+    /// `false`, writing nothing, when `position` isn't inside such a
+    /// string at all.
+    fn writeImportStringCompletions(self: *Server, writer: *Io.Writer, id: std.json.Value, uri: []const u8, position: Position) !bool {
+        const doc = self.documents.get(uri) orelse return false;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const prefix = imports.importStringPrefixAt(parsed_file.ast, offset) orelse return false;
+
+        self.ensurePackagesForUri(uri);
+        const completions = try imports.collectImportCompletions(self.gpa, self.io, uri, prefix, self.zig_lib_dir, &self.packages);
+        defer imports.freeImportCompletions(self.gpa, completions);
+
+        // LSP `CompletionItemKind`: 9 = Module, 17 = File, 19 = Folder.
+        const CompletionItemResult = struct { label: []const u8, kind: u8 };
+        var items: std.ArrayList(CompletionItemResult) = .empty;
+        defer items.deinit(self.gpa);
+        for (completions) |c| {
+            const kind: u8 = if (c.is_directory) 19 else if (std.mem.endsWith(u8, c.label, ".zig")) 17 else 9;
+            try items.append(self.gpa, .{ .label = c.label, .kind = kind });
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, id, items.items);
+        return true;
     }
 
     /// The last line/character of `text`, byte-based like the rest of
@@ -1694,49 +1760,6 @@ pub const Server = struct {
 
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, results.items);
     }
-
-    fn handleDocumentLink(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
-        const Params = struct { textDocument: struct { uri: []const u8 } };
-        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
-            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/documentLink params");
-            return;
-        };
-        defer parsed.deinit();
-
-        const DocumentLinkResult = struct {
-            range: Range,
-            target: []const u8,
-        };
-        var links: std.ArrayList(DocumentLinkResult) = .empty;
-        defer links.deinit(self.gpa);
-
-        const uri = parsed.value.textDocument.uri;
-        const doc = self.documents.get(uri) orelse {
-            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as([]const DocumentLinkResult, &.{}));
-            return;
-        };
-
-        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
-        const imports_list = try self.findImportsFor(parsed_file.ast, uri);
-        defer imports.freeImports(self.gpa, imports_list);
-
-        for (imports_list) |imp| {
-            const target = imp.uri orelse continue;
-            const loc = parsed_file.ast.tokenLocation(0, imp.string_token);
-            const slice = parsed_file.ast.tokenSlice(imp.string_token);
-            // Whole string token — including quotes — so Ctrl+click is one
-            // link, not a fragment per `/` / `.` path segment.
-            try links.append(self.gpa, .{
-                .range = .{
-                    .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
-                    .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + slice.len) },
-                },
-                .target = target,
-            });
-        }
-
-        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, links.items);
-    }
 };
 
 const harness = @import("protocol/harness.zig");
@@ -2049,11 +2072,37 @@ test "textDocument/definition on an import binding's declaration redirects to th
     try std.testing.expectEqual(@as(i64, 0), result.get("range").?.object.get("start").?.object.get("character").?.integer);
 }
 
-test "textDocument/definition on a later use of an import binding also redirects to the imported file" {
-    // The FIXME this resolves: previously this landed on the local
-    // `const helpers = @import(...)` line, not the file itself — correct
-    // in the narrow sense that's where `helpers` is declared, but not
-    // what "go to definition" on a module identifier should do.
+test "textDocument/definition on a bare later use of an import binding redirects to the imported file" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/helpers.zig","text":"pub fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const helpers = @import(\"helpers.zig\");\nfn main() void {\n    _ = helpers;\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    // "helpers" in "_ = helpers;" — a bare reference, not the base of a
+    // dotted access, so it redirects straight into the imported file.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":2,"character":9}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("file:///proj/helpers.zig", result.get("uri").?.string);
+}
+
+test "textDocument/definition on the base of a dotted access stops at the local import binding" {
+    // The base of `helpers.add(...)` isn't itself a further-resolvable
+    // reference the way its field (`add`) is — clicking it should show
+    // where `helpers` is bound in *this* file, matching how e.g. Go
+    // tooling treats `pkg.Symbol`: clicking `pkg` goes to the import,
+    // clicking `Symbol` goes to its real declaration.
     const gpa = std.testing.allocator;
     var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
@@ -2074,7 +2123,41 @@ test "textDocument/definition on a later use of an import binding also redirects
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
     defer parsed.deinit();
     const result = parsed.value.object.get("result").?.object;
-    try std.testing.expectEqualStrings("file:///proj/helpers.zig", result.get("uri").?.string);
+    try std.testing.expectEqualStrings("file:///proj/main.zig", result.get("uri").?.string);
+    const range = result.get("range").?.object;
+    try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
+    try std.testing.expectEqual(@as(i64, 6), range.get("start").?.object.get("character").?.integer);
+}
+
+test "textDocument/definition on a field of a dotted import access resolves into the imported file" {
+    // The other half of the same distinction: `Shell` (the field) in
+    // `completions.Shell` should resolve through the `completions`
+    // binding into its *real* declaration in the imported file, not the
+    // local re-export line that happens to share its name.
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/completions.zig","text":"pub const Shell = enum { bash, zsh, fish };\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const completions = @import(\"completions.zig\");\npub const Shell = completions.Shell;\n"}}}
+    });
+    defer opened.deinit();
+
+    // "Shell" field in "completions.Shell", at character 30.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":1,"character":30}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("file:///proj/completions.zig", result.get("uri").?.string);
+    const range = result.get("range").?.object;
+    try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
+    try std.testing.expectEqual(@as(i64, 10), range.get("start").?.object.get("character").?.integer); // "pub const Shell" -> 'S' at col 10
 }
 
 test "editing an imported file's function body does not recompute the importer's cache (the Phase 6 milestone)" {
@@ -2393,7 +2476,13 @@ test "textDocument/hover on std.fmt shows stdlib container docs from disk" {
     try std.testing.expect(std.mem.indexOf(u8, value, "String formatting and parsing.") != null);
 }
 
-test "textDocument/documentLink covers the whole @import string" {
+test "textDocument/hover on an @import string excludes the surrounding quotes from its range" {
+    // No `documentLinkProvider` (neither zls nor zigscient implement it —
+    // its persistent underline styling was exactly the "always
+    // underlined, even the quotes" bug this range covers instead):
+    // go-to-definition + hover already handle `@import("...")` strings,
+    // and VS Code's ctrl+hover underline is driven by the position a
+    // definition/hover request resolves at, not a link decoration.
     const gpa = std.testing.allocator;
     var server: Server = .init(gpa, std.testing.io);
     defer server.deinit();
@@ -2405,33 +2494,26 @@ test "textDocument/documentLink covers the whole @import string" {
     });
     defer opened.deinit();
 
-    var responses = try harness.run(gpa, &server, &.{
-        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/documentLink","params":{"textDocument":{"uri":"file:///proj/main.zig"}}}
-    });
-    defer responses.deinit();
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
-    defer parsed.deinit();
-    const links = parsed.value.object.get("result").?.array.items;
-    try std.testing.expectEqual(@as(usize, 1), links.len);
-    try std.testing.expectEqualStrings("file:///proj/commands/check.zig", links[0].object.get("target").?.string);
-    // Entire `"commands/check.zig"` token — not split on `/` or `.`.
-    const range = links[0].object.get("range").?.object;
-    try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
-    const start_char = range.get("start").?.object.get("character").?.integer;
-    const end_char = range.get("end").?.object.get("character").?.integer;
-    try std.testing.expectEqual(@as(i64, "commands/check.zig".len + 2), end_char - start_char);
-
     // Hover on the string includes one markdown link with the full path label.
     var hover_responses = try harness.run(gpa, &server, &.{
-        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":35}}}
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":35}}}
     });
     defer hover_responses.deinit();
     var hover_parsed = try std.json.parseFromSlice(std.json.Value, gpa, hover_responses.messages.items[0], .{});
     defer hover_parsed.deinit();
-    const hover_value = hover_parsed.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
+    const result = hover_parsed.value.object.get("result").?.object;
+    const hover_value = result.get("contents").?.object.get("value").?.string;
     try std.testing.expect(std.mem.indexOf(u8, hover_value, "[commands/check.zig](file:///proj/commands/check.zig)") != null);
     try std.testing.expect(std.mem.indexOf(u8, hover_value, "Check command.") != null);
+
+    // Range covers exactly `commands/check.zig` (19 chars) — not the
+    // quotes on either side.
+    const range = result.get("range").?.object;
+    try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
+    const start_char = range.get("start").?.object.get("character").?.integer;
+    const end_char = range.get("end").?.object.get("character").?.integer;
+    try std.testing.expectEqual(@as(i64, "commands/check.zig".len), end_char - start_char);
+    try std.testing.expectEqual(@as(i64, 31), start_char); // just past the opening quote
 }
 
 test "textDocument/inlayHint respects enable=false" {
@@ -2607,6 +2689,39 @@ test "textDocument/completion offers keywords, top-level items, and in-scope loc
     try std.testing.expect(saw_keyword);
     try std.testing.expect(saw_top_level);
     try std.testing.expect(saw_local);
+}
+
+test "textDocument/completion inside an @import string suggests std and named packages, not keywords" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+    server.zig_lib_dir = try gpa.dupe(u8, "/opt/zig/lib");
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"const x = @import(\"st\");\n"}}}
+    });
+    defer opened.deinit();
+
+    // Cursor right after "st", inside the still-open string.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///a.zig"},"position":{"line":0,"character":21}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.array.items;
+
+    var saw_std = false;
+    for (items) |item| {
+        const label = item.object.get("label").?.string;
+        try std.testing.expect(!std.mem.eql(u8, label, "const")); // no keywords inside the string
+        if (std.mem.eql(u8, label, "std")) {
+            saw_std = true;
+            try std.testing.expectEqual(@as(i64, 9), item.object.get("kind").?.integer); // Module
+        }
+    }
+    try std.testing.expect(saw_std);
 }
 
 test "textDocument/formatting formats via the default zig fmt --stdin" {
