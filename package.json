@@ -149,6 +149,11 @@
           "type": "boolean",
           "default": true,
           "description": "Omit parameter-name inlay hints for calls with exactly one argument."
+        },
+        "zigAnalyzer.inlayHints.types": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred-type inlay hints for const/var declarations initialized with a literal (e.g. a string) and no explicit type annotation."
         }
       }
     },

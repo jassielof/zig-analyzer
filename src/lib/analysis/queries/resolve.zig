@@ -293,15 +293,11 @@ pub fn isFieldAccessBase(ast: Ast, token: Ast.TokenIndex) bool {
         ast.tokenTag(token + 2) == .identifier;
 }
 
-/// Walks a dotted access leftward from the identifier under `pos`.
-/// For `std.debug.print` with the cursor on `print`, returns
-/// `["std", "debug", "print"]` (borrowed slices into `ast.source`).
-/// Returns `null` when there's no identifier at `pos`. A bare identifier
-/// (no dots) yields a one-element chain.
-pub fn fieldAccessChainAt(gpa: std.mem.Allocator, ast: Ast, pos: Position) !?[]const []const u8 {
-    const offset = positionToOffset(ast.source, pos);
-    const tip = identifierTokenAt(ast, offset) orelse return null;
-
+/// Walks a dotted access leftward from `tip` (the rightmost identifier
+/// token). For `std.debug.print` with `tip` on `print`, returns
+/// `["std", "debug", "print"]` (borrowed slices into `ast.source`). A
+/// `tip` with no `.identifier` before it yields a one-element chain.
+pub fn fieldAccessChainFromToken(gpa: std.mem.Allocator, ast: Ast, tip: Ast.TokenIndex) ![]const []const u8 {
     var tokens: std.ArrayList(Ast.TokenIndex) = .empty;
     defer tokens.deinit(gpa);
     try tokens.append(gpa, tip);
@@ -323,6 +319,52 @@ pub fn fieldAccessChainAt(gpa: std.mem.Allocator, ast: Ast, pos: Position) !?[]c
         try names.append(gpa, ast.tokenSlice(tokens.items[i]));
     }
     return try names.toOwnedSlice(gpa);
+}
+
+/// Walks a dotted access leftward from the identifier under `pos`.
+/// For `std.debug.print` with the cursor on `print`, returns
+/// `["std", "debug", "print"]` (borrowed slices into `ast.source`).
+/// Returns `null` when there's no identifier at `pos`. A bare identifier
+/// (no dots) yields a one-element chain.
+pub fn fieldAccessChainAt(gpa: std.mem.Allocator, ast: Ast, pos: Position) !?[]const []const u8 {
+    const offset = positionToOffset(ast.source, pos);
+    const tip = identifierTokenAt(ast, offset) orelse return null;
+    return try fieldAccessChainFromToken(gpa, ast, tip);
+}
+
+/// True if every token spanning `node` alternates `identifier`, `.`,
+/// `identifier`, `.`, ... with nothing else (no calls, indexing, or
+/// other syntax) — i.e. `node` is a plain dotted access like `std.zig.Ast`,
+/// not something merely shaped like the start of one (`foo().bar`).
+pub fn isPlainFieldAccessChain(ast: Ast, node: Ast.Node.Index) bool {
+    const first = ast.firstToken(node);
+    const last = ast.lastToken(node);
+    var idx = first;
+    var expect_identifier = true;
+    while (idx <= last) : (idx += 1) {
+        const want: std.zig.Token.Tag = if (expect_identifier) .identifier else .period;
+        if (ast.tokenTag(idx) != want) return false;
+        expect_identifier = !expect_identifier;
+    }
+    return !expect_identifier; // ends on an identifier, not a trailing period
+}
+
+/// Finds a top-level `const`/`var` declaration named `name` and returns
+/// its initializer node, or `null` if there isn't one or it has none
+/// (e.g. an `extern` decl). Used to look through a plain alias
+/// (`const Ast = std.zig.Ast;`) to what it actually points at.
+pub fn rootVarDeclInitNode(ast: Ast, name: []const u8) ?Ast.Node.Index {
+    for (ast.rootDecls()) |node| {
+        switch (ast.nodeTag(node)) {
+            .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {},
+            else => continue,
+        }
+        const var_decl = ast.fullVarDecl(node) orelse continue;
+        const name_token = var_decl.ast.mut_token + 1;
+        if (!std.mem.eql(u8, ast.tokenSlice(name_token), name)) continue;
+        return var_decl.ast.init_node.unwrap();
+    }
+    return null;
 }
 
 /// Collects the parameter and immediate-body local variable names in
@@ -598,6 +640,33 @@ test "isFieldAccessBase distinguishes the base from the field of a dotted access
     try testing.expect(isFieldAccessBase(ast, base_token.?));
     try testing.expect(!isFieldAccessBase(ast, field_token.?));
     try testing.expect(!isFieldAccessBase(ast, x_token.?));
+}
+
+test "isPlainFieldAccessChain accepts a dotted chain and rejects a call" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "const a = std.zig.Ast;\nconst b = std.zig.Ast.parse(x);\n", .zig);
+    defer ast.deinit(gpa);
+
+    const init_a = rootVarDeclInitNode(ast, "a").?;
+    try testing.expect(isPlainFieldAccessChain(ast, init_a));
+
+    const init_b = rootVarDeclInitNode(ast, "b").?;
+    try testing.expect(!isPlainFieldAccessChain(ast, init_b));
+}
+
+test "fieldAccessChainFromToken walks a dotted chain to its outermost base" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "const a = std.zig.Ast;\n", .zig);
+    defer ast.deinit(gpa);
+
+    const init_node = rootVarDeclInitNode(ast, "a").?;
+    const chain = try fieldAccessChainFromToken(gpa, ast, ast.lastToken(init_node));
+    defer gpa.free(chain);
+
+    try testing.expectEqual(@as(usize, 3), chain.len);
+    try testing.expectEqualStrings("std", chain[0]);
+    try testing.expectEqualStrings("zig", chain[1]);
+    try testing.expectEqualStrings("Ast", chain[2]);
 }
 
 test "resolveAt does not mismatch a dotted field against an unrelated same-named top-level item" {

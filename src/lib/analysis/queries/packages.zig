@@ -29,7 +29,11 @@ pub fn clearPackages(gpa: std.mem.Allocator, map: *PackageMap) void {
 /// Reads `build.zig.zon` under `workspace_root_path` and inserts deps into
 /// `out`. Existing entries with the same name are kept (first wins).
 /// `global_cache_dir` is required to resolve URL/hash deps; path deps work
-/// without it.
+/// without it. Also registers modules `build.zig` creates entirely on its
+/// own via `b.addModule("name", .{ .root_source_file = b.path("…") })` —
+/// these have no `build.zig.zon` entry at all (purely local module
+/// aliasing), so they're handled independently of whether a zon file
+/// exists or parses.
 pub fn loadDepsFromWorkspace(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -37,6 +41,16 @@ pub fn loadDepsFromWorkspace(
     global_cache_dir: ?[]const u8,
     out: *PackageMap,
 ) !void {
+    // Prefer import names from this workspace's `build.zig` `addImport("…")`
+    // when present; fall back to the zon dependency key.
+    const import_names = try parseAddImportNames(gpa, io, workspace_root_path);
+    defer {
+        for (import_names) |n| gpa.free(n);
+        gpa.free(import_names);
+    }
+
+    try loadAddModuleRootsFromBuildZig(gpa, io, workspace_root_path, out);
+
     const zon_path = try std.fs.path.join(gpa, &.{ workspace_root_path, "build.zig.zon" });
     defer gpa.free(zon_path);
 
@@ -51,14 +65,6 @@ pub fn loadDepsFromWorkspace(
             if (d.hash) |h| gpa.free(h);
         }
         gpa.free(deps);
-    }
-
-    // Prefer import names from this workspace's `build.zig` `addImport("…")`
-    // when present; fall back to the zon dependency key.
-    const import_names = try parseAddImportNames(gpa, io, workspace_root_path);
-    defer {
-        for (import_names) |n| gpa.free(n);
-        gpa.free(import_names);
     }
 
     for (deps) |dep| {
@@ -83,6 +89,119 @@ pub fn loadDepsFromWorkspace(
             }
         }
     }
+}
+
+const AddModuleRoot = struct { name: []u8, rel_path: []u8 };
+
+/// Finds `b.addModule("name", .{ ... .root_source_file = b.path("rel") ... })`
+/// calls in `workspace_root_path`'s `build.zig` and registers each as a
+/// package directly — these are modules the build script defines and
+/// wires up entirely on its own (`exe.root_module.addImport("name", mod)`),
+/// with no corresponding `build.zig.zon` dependency to correlate against.
+fn loadAddModuleRootsFromBuildZig(gpa: std.mem.Allocator, io: std.Io, workspace_root_path: []const u8, out: *PackageMap) !void {
+    const build_path = try std.fs.path.join(gpa, &.{ workspace_root_path, "build.zig" });
+    defer gpa.free(build_path);
+    const source = readFileAlloc(gpa, io, build_path) catch return;
+    defer gpa.free(source);
+
+    const roots = try parseAddModuleRoots(gpa, source);
+    defer {
+        for (roots) |r| {
+            gpa.free(r.name);
+            gpa.free(r.rel_path);
+        }
+        gpa.free(roots);
+    }
+
+    for (roots) |r| {
+        const full = std.fs.path.resolve(gpa, &.{ workspace_root_path, r.rel_path }) catch continue;
+        defer gpa.free(full);
+        if (!fileExists(io, full)) continue;
+        const root_uri = try uri_util.fromPath(gpa, full);
+        defer gpa.free(root_uri);
+        try putPackage(gpa, out, r.name, root_uri);
+    }
+}
+
+fn parseAddModuleRoots(gpa: std.mem.Allocator, source: []const u8) ![]AddModuleRoot {
+    var out: std.ArrayList(AddModuleRoot) = .empty;
+    errdefer {
+        for (out.items) |r| {
+            gpa.free(r.name);
+            gpa.free(r.rel_path);
+        }
+        out.deinit(gpa);
+    }
+
+    const needle = "addModule(";
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, source, start, needle)) |idx| {
+        const open_paren = idx + needle.len - 1;
+        var i = open_paren + 1;
+        while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\n' or source[i] == '\r')) : (i += 1) {}
+
+        if (i >= source.len or source[i] != '"') {
+            start = idx + needle.len;
+            continue;
+        }
+        i += 1;
+        const name_start = i;
+        while (i < source.len and source[i] != '"') : (i += 1) {}
+        if (i >= source.len) break;
+        const name = source[name_start..i];
+
+        const close_paren = findMatchingParen(source, open_paren) orelse break;
+        start = close_paren + 1;
+
+        const call_body = source[open_paren + 1 .. close_paren];
+        const rel = extractRootSourceFilePath(call_body) orelse continue;
+
+        try out.append(gpa, .{ .name = try gpa.dupe(u8, name), .rel_path = try gpa.dupe(u8, rel) });
+    }
+
+    return out.toOwnedSlice(gpa);
+}
+
+/// `.root_source_file = b.path("rel")` (or `.path("rel")`) within an
+/// `addModule`/`addExecutable`/`createModule` call's body.
+fn extractRootSourceFilePath(call_body: []const u8) ?[]const u8 {
+    const key = "root_source_file";
+    const key_idx = std.mem.indexOf(u8, call_body, key) orelse return null;
+    const marker = "path(\"";
+    const path_idx = std.mem.indexOfPos(u8, call_body, key_idx + key.len, marker) orelse return null;
+    const rel_start = path_idx + marker.len;
+    const rel_end = std.mem.indexOfScalarPos(u8, call_body, rel_start, '"') orelse return null;
+    const rel = call_body[rel_start..rel_end];
+    if (!std.mem.endsWith(u8, rel, ".zig")) return null;
+    return rel;
+}
+
+fn findMatchingParen(source: []const u8, open_index: usize) ?usize {
+    if (open_index >= source.len or source[open_index] != '(') return null;
+    var depth: i32 = 0;
+    var i = open_index;
+    var in_string = false;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        if (in_string) {
+            if (c == '\\' and i + 1 < source.len) {
+                i += 1;
+                continue;
+            }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        switch (c) {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 /// Walks parent directories of `file_path` looking for `build.zig.zon` and
@@ -462,7 +581,14 @@ fn dirExists(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-fn readFileAlloc(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+/// Returns `[:0]u8`, not `[]u8`: `std.zig.readSourceFileToEndAlloc`
+/// allocates one extra sentinel byte beyond `.len`, which `Allocator.free`
+/// only accounts for when the slice's *type* still carries the `:0` —
+/// silently widening to `[]u8` here would make every `gpa.free(source)`
+/// at a call site free one byte less than was actually allocated
+/// (harmless in release modes, a hard `DebugAllocator` corruption error
+/// in debug/test builds).
+fn readFileAlloc(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![:0]u8 {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var read_buf: [4096]u8 = undefined;
@@ -511,4 +637,81 @@ test "parseDependencies finds path and hash entries" {
 test "namesLooselyEqual treats dash and underscore as equal" {
     try testing.expect(namesLooselyEqual("known_folders", "known-folders"));
     try testing.expect(!namesLooselyEqual("foo", "bar"));
+}
+
+test "parseAddModuleRoots finds a purely-local addModule with no zon dependency" {
+    const gpa = testing.allocator;
+    const source =
+        \\const std = @import("std");
+        \\pub fn build(b: *std.Build) void {
+        \\    const doc_comment_mod = b.addModule("doc_comment", .{
+        \\        .root_source_file = b.path("src/doc_comment.zig"),
+        \\    });
+        \\    _ = doc_comment_mod;
+        \\}
+    ;
+    const roots = try parseAddModuleRoots(gpa, source);
+    defer {
+        for (roots) |r| {
+            gpa.free(r.name);
+            gpa.free(r.rel_path);
+        }
+        gpa.free(roots);
+    }
+
+    try testing.expectEqual(@as(usize, 1), roots.len);
+    try testing.expectEqualStrings("doc_comment", roots[0].name);
+    try testing.expectEqualStrings("src/doc_comment.zig", roots[0].rel_path);
+}
+
+test "parseAddModuleRoots ignores an addModule call with no root_source_file" {
+    const gpa = testing.allocator;
+    const source =
+        \\pub fn build(b: *std.Build) void {
+        \\    _ = b.addModule("late_bound", .{});
+        \\}
+    ;
+    const roots = try parseAddModuleRoots(gpa, source);
+    defer gpa.free(roots);
+    try testing.expectEqual(@as(usize, 0), roots.len);
+}
+
+test "loadDepsFromWorkspace registers a build.zig-only addModule even with no build.zig.zon" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(testing.io, "src", .default_dir);
+    (tmp.dir.createFile(testing.io, "src/doc_comment.zig", .{}) catch unreachable).close(testing.io);
+
+    {
+        var f = try tmp.dir.createFile(testing.io, "build.zig", .{});
+        defer f.close(testing.io);
+        var buf: [256]u8 = undefined;
+        var writer = f.writer(testing.io, &buf);
+        try writer.interface.writeAll(
+            \\pub fn build(b: *std.Build) void {
+            \\    _ = b.addModule("doc_comment", .{
+            \\        .root_source_file = b.path("src/doc_comment.zig"),
+            \\    });
+            \\}
+        );
+        try writer.interface.flush();
+    }
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(testing.io, &path_buf);
+    const abs_dir = path_buf[0..len];
+
+    var packages: PackageMap = .empty;
+    defer clearPackagesAndDeinit(gpa, &packages);
+    try loadDepsFromWorkspace(gpa, testing.io, abs_dir, null, &packages);
+
+    const root_uri = packages.get("doc_comment").?;
+    try testing.expect(std.mem.endsWith(u8, root_uri, "src/doc_comment.zig"));
+}
+
+fn clearPackagesAndDeinit(gpa: std.mem.Allocator, map: *PackageMap) void {
+    clearPackages(gpa, map);
+    map.deinit(gpa);
 }

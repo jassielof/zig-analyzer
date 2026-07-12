@@ -73,6 +73,14 @@ pub const Server = struct {
     inlay_hints_enable: bool = true,
     inlay_hints_parameter_names: bool = true,
     inlay_hints_exclude_single_argument: bool = true,
+    inlay_hints_types: bool = true,
+    /// Whether the client can accept `LocationLink[]` (with a wider
+    /// `originSelectionRange`) instead of plain `Location[]` for
+    /// `textDocument/definition` — from the client's declared
+    /// `capabilities.textDocument.definition.linkSupport`. Needed so an
+    /// `@import("a/b.zig")` string's whole path underlines as one span
+    /// on ctrl+hover, not per word-boundary fragment.
+    definition_link_support: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, io: Io) Server {
         return .{ .gpa = gpa, .io = io, .documents = .init(gpa) };
@@ -131,6 +139,7 @@ pub const Server = struct {
         enable: ?bool = null,
         parameterNames: ?bool = null,
         excludeSingleArgument: ?bool = null,
+        types: ?bool = null,
     };
     const ServerOptions = struct {
         formatter: ?FormatterOptions = null,
@@ -169,6 +178,7 @@ pub const Server = struct {
             if (ih.enable) |v| self.inlay_hints_enable = v;
             if (ih.parameterNames) |v| self.inlay_hints_parameter_names = v;
             if (ih.excludeSingleArgument) |v| self.inlay_hints_exclude_single_argument = v;
+            if (ih.types) |v| self.inlay_hints_types = v;
         }
 
         if (parsed.value.formatter) |formatter| {
@@ -304,10 +314,18 @@ pub const Server = struct {
             return;
         }
 
+        const ClientCapabilities = struct {
+            textDocument: ?struct {
+                definition: ?struct {
+                    linkSupport: ?bool = null,
+                } = null,
+            } = null,
+        };
         const Params = struct {
             initializationOptions: std.json.Value = .null,
             workspaceFolders: ?[]const WorkspaceFolder = null,
             rootUri: ?[]const u8 = null,
+            capabilities: ClientCapabilities = .{},
         };
         if (std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true })) |parsed| {
             defer parsed.deinit();
@@ -315,6 +333,10 @@ pub const Server = struct {
             // Need lib + package-cache dirs before resolving zon deps.
             if (self.zig_lib_dir == null or self.zig_global_cache_dir == null) self.discoverZigLibDir();
             self.reloadPackagesFromFolders(parsed.value.workspaceFolders, parsed.value.rootUri);
+            self.definition_link_support = if (parsed.value.capabilities.textDocument) |td|
+                if (td.definition) |def| (def.linkSupport orelse false) else false
+            else
+                false;
         } else |err| {
             std.log.err("ignoring malformed initialize params: {t}", .{err});
             if (self.zig_lib_dir == null) self.discoverZigLibDir();
@@ -576,14 +598,8 @@ pub const Server = struct {
         // (the binding name was already redirected in redirectImportBinding).
         if (try self.definitionForImportString(uri, position)) |any| {
             defer self.freeAnyDefinition(any);
-            const LocationResult = struct { uri: []const u8, range: Range };
-            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
-                .uri = any.uri,
-                .range = .{
-                    .start = .{ .line = any.def.line, .character = any.def.character },
-                    .end = .{ .line = any.def.line, .character = any.def.end_character },
-                },
-            });
+            const origin = try self.importStringOriginRange(uri, position);
+            try self.writeDefinitionResponse(writer, msg.id.?, any, origin);
             return;
         }
 
@@ -610,14 +626,80 @@ pub const Server = struct {
             try self.redirectImportBinding(initial.uri, initial.def);
         defer self.freeAnyDefinition(any);
 
+        const origin = try self.identifierOriginRange(uri, position);
+        try self.writeDefinitionResponse(writer, msg.id.?, any, origin);
+    }
+
+    /// The full `"a/b.zig"` path text (quotes excluded) of the
+    /// `@import(...)` string at `position`, or `null` if `position` isn't
+    /// inside one — used as `LocationLink.originSelectionRange` so the
+    /// *entire* path underlines as one span on ctrl+hover, instead of
+    /// VS Code's default per-word-boundary underline fragmenting it at
+    /// every `.`/`/` (e.g. "../../Diagnostic.zig" underlining
+    /// "Diagnostic" and "zig" as two separate spans).
+    fn importStringOriginRange(self: *Server, uri: []const u8, position: Position) !?Range {
+        const doc = self.documents.get(uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const imports_list = try self.findImportsFor(parsed_file.ast, uri);
+        defer imports.freeImports(self.gpa, imports_list);
+
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const imp = imports.importAtOffset(imports_list, parsed_file.ast, offset) orelse return null;
+
+        const loc = parsed_file.ast.tokenLocation(0, imp.string_token);
+        const token_len = parsed_file.ast.tokenSlice(imp.string_token).len;
+        return .{
+            .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + 1) },
+            .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + token_len - 1) },
+        };
+    }
+
+    /// The span of the identifier token at `position`, or `null` if
+    /// there isn't one — the origin range for an ordinary (non-import-
+    /// string) go-to-definition.
+    fn identifierOriginRange(self: *Server, uri: []const u8, position: Position) !?Range {
+        const doc = self.documents.get(uri) orelse return null;
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+        const tok = resolve.identifierTokenAt(parsed_file.ast, offset) orelse return null;
+        const loc = parsed_file.ast.tokenLocation(0, tok);
+        const len = parsed_file.ast.tokenSlice(tok).len;
+        return .{
+            .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
+            .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + len) },
+        };
+    }
+
+    /// Writes a `textDocument/definition` result as `LocationLink[]` when
+    /// the client declared `linkSupport` (so `origin` can widen the
+    /// ctrl+hover underline beyond a single word), or plain `Location`
+    /// otherwise — `origin` is simply ignored in that case, since
+    /// `Location` has no field for it.
+    fn writeDefinitionResponse(self: *Server, writer: *Io.Writer, id: std.json.Value, any: AnyDefinition, origin: ?Range) !void {
+        const target_range: Range = .{
+            .start = .{ .line = any.def.line, .character = any.def.character },
+            .end = .{ .line = any.def.line, .character = any.def.end_character },
+        };
+
+        if (self.definition_link_support) {
+            const LocationLinkResult = struct {
+                originSelectionRange: ?Range = null,
+                targetUri: []const u8,
+                targetRange: Range,
+                targetSelectionRange: Range,
+            };
+            const links = [_]LocationLinkResult{.{
+                .originSelectionRange = origin,
+                .targetUri = any.uri,
+                .targetRange = target_range,
+                .targetSelectionRange = target_range,
+            }};
+            try jsonrpc.writeResult(writer, self.gpa, id, &links);
+            return;
+        }
+
         const LocationResult = struct { uri: []const u8, range: Range };
-        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
-            .uri = any.uri,
-            .range = .{
-                .start = .{ .line = any.def.line, .character = any.def.character },
-                .end = .{ .line = any.def.line, .character = any.def.end_character },
-            },
-        });
+        try jsonrpc.writeResult(writer, self.gpa, id, LocationResult{ .uri = any.uri, .range = target_range });
     }
 
     fn isFieldAccessBaseAt(self: *Server, uri: []const u8, position: Position) !bool {
@@ -772,41 +854,17 @@ pub const Server = struct {
                 docs = container;
             } else {
                 docs = try doc_comments.getDocCommentsForRootName(self.gpa, target.ast, decl_name);
-            }
-        }
-
-        var link_uri: ?[]const u8 = null;
-        var link_label: ?[]const u8 = null;
-        var owned_link_uri: ?[]u8 = null;
-        var owned_link_label: ?[]u8 = null;
-        defer if (owned_link_uri) |u| self.gpa.free(u);
-        defer if (owned_link_label) |l| self.gpa.free(l);
-
-        // Prefer the import path as the link label when this is an import binding.
-        if (self.documents.get(uri)) |doc| {
-            const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
-            const imports_list = try self.findImportsFor(parsed_file.ast, uri);
-            defer imports.freeImports(self.gpa, imports_list);
-            const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
-            if (resolve.identifierTokenAt(parsed_file.ast, offset)) |tok| {
-                const name = parsed_file.ast.tokenSlice(tok);
-                for (imports_list) |imp| {
-                    if (!std.mem.eql(u8, imp.name, name)) continue;
-                    if (imp.uri) |target| {
-                        owned_link_uri = try self.gpa.dupe(u8, target);
-                        owned_link_label = try self.gpa.dupe(u8, imp.path);
-                        link_uri = owned_link_uri;
-                        link_label = owned_link_label;
-                    }
-                    break;
+                // A plain alias (`const Ast = std.zig.Ast;`) usually has
+                // no doc comment of its own — fall through to whatever
+                // it points at, so hovering the alias shows the same
+                // docs as hovering its target does.
+                if (docs == null) {
+                    docs = try self.aliasedDocComments(any.uri, target.ast, decl_name);
                 }
             }
         }
-        if (link_uri == null and std.mem.startsWith(u8, any.def.signature, "@import(")) {
-            link_uri = any.uri;
-        }
 
-        const value = try formatHoverMarkdown(self.gpa, any.def.signature, docs, doctest, link_uri, link_label);
+        const value = try formatHoverMarkdown(self.gpa, any.def.signature, docs, doctest);
         defer self.gpa.free(value);
 
         // Hover's range highlights the hovered word in the *current*
@@ -857,7 +915,7 @@ pub const Server = struct {
         defer if (docs) |d| self.gpa.free(d);
         docs = try self.containerDocsForUri(target_uri);
 
-        const value = try formatHoverMarkdown(self.gpa, signature, docs, null, target_uri, imp.path);
+        const value = try formatHoverMarkdown(self.gpa, signature, docs, null);
         return .{ .value = value, .range = range };
     }
 
@@ -874,6 +932,29 @@ pub const Server = struct {
             return try self.containerDocsForUri(target_uri);
         }
         return null;
+    }
+
+    /// If `decl_name` in `ast` (the file at `uri`) is a plain alias
+    /// (`const Ast = std.zig.Ast;` — a dotted chain with no calls) whose
+    /// base resolves through an import binding, returns the aliased
+    /// target's own doc comment. This is what lets hovering the alias
+    /// itself (`const Ast`) show the same docs as hovering what it
+    /// points at (`std.zig.Ast`) already does via cross-file resolution.
+    fn aliasedDocComments(self: *Server, uri: []const u8, ast: Ast, decl_name: []const u8) !?[]const u8 {
+        const init_node = resolve.rootVarDeclInitNode(ast, decl_name) orelse return null;
+        if (!resolve.isPlainFieldAccessChain(ast, init_node)) return null;
+
+        const chain = try resolve.fieldAccessChainFromToken(self.gpa, ast, ast.lastToken(init_node));
+        defer self.gpa.free(chain);
+        if (chain.len < 2) return null;
+
+        const cross = try self.resolveFieldChain(uri, ast, chain) orelse return null;
+        defer self.freeAnyDefinition(cross);
+
+        const target = try self.parseUri(cross.uri) orelse return null;
+        defer target.deinit(self);
+        const target_name = nameOfDefinition(target.ast, cross.def);
+        return try doc_comments.getDocCommentsForRootName(self.gpa, target.ast, target_name);
     }
 
     fn containerDocsForUri(self: *Server, target_uri: []const u8) !?[]const u8 {
@@ -969,8 +1050,6 @@ pub const Server = struct {
         signature: []const u8,
         docs: ?[]const u8,
         doctest: ?[]const u8,
-        link_uri: ?[]const u8,
-        link_label: ?[]const u8,
     ) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(gpa);
@@ -986,13 +1065,6 @@ pub const Server = struct {
                 try out.appendSlice(gpa, "\n\n");
                 try out.appendSlice(gpa, d);
             }
-        }
-
-        // One markdown link for the whole target path — avoids VS Code
-        // auto-linkifying `commands/check.zig` into separate fragments.
-        if (link_uri) |uri| {
-            const label = link_label orelse uri;
-            try out.print(gpa, "\n\n[{s}]({s})", .{ label, uri });
         }
 
         if (doctest) |dt| {
@@ -1710,7 +1782,7 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
-        if (!self.inlay_hints_enable or !self.inlay_hints_parameter_names) {
+        if (!self.inlay_hints_enable) {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as([]const struct { position: Position, label: []const u8 }, &.{}));
             return;
         }
@@ -1724,20 +1796,6 @@ pub const Server = struct {
         const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
         const tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, uri, parsed_file.ast, doc.revision);
 
-        var lookup_ctx: InlayLookupCtx = .{
-            .server = self,
-            .importer_uri = uri,
-            .importer_ast = parsed_file.ast,
-            .tree = tree.*,
-            .owned_sig = null,
-        };
-        defer if (lookup_ctx.owned_sig) |s| self.gpa.free(s);
-
-        const hints = try inlay_hints.collect(self.gpa, parsed_file.ast, tree.*, inlayLookupSignature, &lookup_ctx, .{
-            .exclude_single_argument = self.inlay_hints_exclude_single_argument,
-        });
-        defer inlay_hints.freeHints(self.gpa, hints);
-
         const InlayHintResult = struct {
             position: Position,
             label: []const u8,
@@ -1748,14 +1806,50 @@ pub const Server = struct {
         var results: std.ArrayList(InlayHintResult) = .empty;
         defer results.deinit(self.gpa);
 
-        for (hints) |h| {
-            // Only include hints that fall within the requested range.
-            if (h.line < parsed.value.range.start.line) continue;
-            if (h.line > parsed.value.range.end.line) continue;
-            try results.append(self.gpa, .{
-                .position = .{ .line = h.line, .character = h.character },
-                .label = h.label,
+        // Both hint slices must outlive `results`, which only borrows
+        // their labels — freed together, after the write below, rather
+        // than at the end of each `if` block.
+        var param_hints: []const inlay_hints.Hint = &.{};
+        defer inlay_hints.freeHints(self.gpa, param_hints);
+        var type_hints: []const inlay_hints.Hint = &.{};
+        defer inlay_hints.freeHints(self.gpa, type_hints);
+
+        if (self.inlay_hints_parameter_names) {
+            var lookup_ctx: InlayLookupCtx = .{
+                .server = self,
+                .importer_uri = uri,
+                .importer_ast = parsed_file.ast,
+                .tree = tree.*,
+                .owned_sig = null,
+            };
+            defer if (lookup_ctx.owned_sig) |s| self.gpa.free(s);
+
+            param_hints = try inlay_hints.collect(self.gpa, parsed_file.ast, tree.*, inlayLookupSignature, &lookup_ctx, .{
+                .exclude_single_argument = self.inlay_hints_exclude_single_argument,
             });
+
+            for (param_hints) |h| {
+                if (h.line < parsed.value.range.start.line) continue;
+                if (h.line > parsed.value.range.end.line) continue;
+                try results.append(self.gpa, .{
+                    .position = .{ .line = h.line, .character = h.character },
+                    .label = h.label,
+                });
+            }
+        }
+
+        if (self.inlay_hints_types) {
+            type_hints = try inlay_hints.collectTypeHints(self.gpa, parsed_file.ast);
+
+            for (type_hints) |h| {
+                if (h.line < parsed.value.range.start.line) continue;
+                if (h.line > parsed.value.range.end.line) continue;
+                try results.append(self.gpa, .{
+                    .position = .{ .line = h.line, .character = h.character },
+                    .label = h.label,
+                    .kind = 1, // Type
+                });
+            }
         }
 
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, results.items);
@@ -2044,6 +2138,45 @@ test "textDocument/definition follows an @import to resolve a cross-file referen
     const range = result.get("range").?.object;
     try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
     try std.testing.expectEqual(@as(i64, 7), range.get("start").?.object.get("character").?.integer);
+}
+
+test "textDocument/definition returns a LocationLink spanning the whole import path when the client supports it" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var init_responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"capabilities":{"textDocument":{"definition":{"linkSupport":true}}}}}
+    });
+    defer init_responses.deinit();
+    try std.testing.expect(server.definition_link_support);
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/commands/check.zig","text":"pub fn run() void {}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const check_command = @import(\"commands/check.zig\");\n"}}}
+    });
+    defer opened.deinit();
+
+    // Cursor on "check" inside "commands/check.zig" — mid-path, the exact
+    // spot that used to underline only "check" and "zig" as two separate
+    // word fragments instead of the whole path.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":42}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const links = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    const link = links[0].object;
+    try std.testing.expectEqualStrings("file:///proj/commands/check.zig", link.get("targetUri").?.string);
+
+    const origin = link.get("originSelectionRange").?.object;
+    const start_char = origin.get("start").?.object.get("character").?.integer;
+    const end_char = origin.get("end").?.object.get("character").?.integer;
+    try std.testing.expectEqual(@as(i64, "commands/check.zig".len), end_char - start_char); // whole path, not one word
 }
 
 test "textDocument/definition on an import binding's declaration redirects to the imported file" {
@@ -2476,6 +2609,33 @@ test "textDocument/hover on std.fmt shows stdlib container docs from disk" {
     try std.testing.expect(std.mem.indexOf(u8, value, "String formatting and parsing.") != null);
 }
 
+test "textDocument/hover on a plain alias shows the aliased target's doc comment" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/target.zig","text":"/// Real doc.\npub const Real = struct {};\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const target = @import(\"target.zig\");\nconst Alias = target.Real;\n"}}}
+    });
+    defer opened.deinit();
+
+    // Hovering "Alias" itself — the alias line has no doc comment of its
+    // own — should still show "Real doc." via the aliased target.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":1,"character":7}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result");
+    try std.testing.expect(result != null and result.? != .null);
+    const value = result.?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value, "Real doc.") != null);
+}
+
 test "textDocument/hover on an @import string excludes the surrounding quotes from its range" {
     // No `documentLinkProvider` (neither zls nor zigscient implement it —
     // its persistent underline styling was exactly the "always
@@ -2494,7 +2654,9 @@ test "textDocument/hover on an @import string excludes the surrounding quotes fr
     });
     defer opened.deinit();
 
-    // Hover on the string includes one markdown link with the full path label.
+    // Hover on the string shows the target's container docs — no trailing
+    // markdown link (it rendered poorly for relative/long stdlib paths
+    // and wasn't useful over go-to-definition, which already works here).
     var hover_responses = try harness.run(gpa, &server, &.{
         \\{"jsonrpc":"2.0","id":1,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":35}}}
     });
@@ -2503,8 +2665,8 @@ test "textDocument/hover on an @import string excludes the surrounding quotes fr
     defer hover_parsed.deinit();
     const result = hover_parsed.value.object.get("result").?.object;
     const hover_value = result.get("contents").?.object.get("value").?.string;
-    try std.testing.expect(std.mem.indexOf(u8, hover_value, "[commands/check.zig](file:///proj/commands/check.zig)") != null);
     try std.testing.expect(std.mem.indexOf(u8, hover_value, "Check command.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover_value, "](") == null); // no markdown link
 
     // Range covers exactly `commands/check.zig` (19 chars) — not the
     // quotes on either side.
@@ -2586,6 +2748,29 @@ test "textDocument/inlayHint shows parameter names at call sites" {
     try std.testing.expectEqual(@as(usize, 2), hints.len);
     try std.testing.expectEqualStrings("a: ", hints[0].object.get("label").?.string);
     try std.testing.expectEqualStrings("b: ", hints[1].object.get("label").?.string);
+}
+
+test "textDocument/inlayHint suppresses a hint when the argument is already named like the parameter" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn visit(tree: i32, extra: i32) void {\n    _ = tree;\n    _ = extra;\n}\nfn main() void {\n    const tree = 1;\n    visit(tree, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":"file:///a.zig"},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const hints = parsed.value.object.get("result").?.array.items;
+    // Only "extra: " — "tree: " would just repeat the local's own name.
+    try std.testing.expectEqual(@as(usize, 1), hints.len);
+    try std.testing.expectEqualStrings("extra: ", hints[0].object.get("label").?.string);
 }
 
 test "unused import is published with the Unnecessary diagnostic tag" {

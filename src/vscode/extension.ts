@@ -164,6 +164,7 @@ interface InlayHintsConfig {
   enable: boolean;
   parameterNames: boolean;
   excludeSingleArgument: boolean;
+  types: boolean;
 }
 
 function getInlayHintsConfig(): InlayHintsConfig {
@@ -172,6 +173,7 @@ function getInlayHintsConfig(): InlayHintsConfig {
     enable: config.get<boolean>("enable", true),
     parameterNames: config.get<boolean>("parameterNames", true),
     excludeSingleArgument: config.get<boolean>("excludeSingleArgument", true),
+    types: config.get<boolean>("types", true),
   };
 }
 

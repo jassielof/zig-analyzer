@@ -1,11 +1,20 @@
-//! Parameter-name inlay hints at call sites.
+//! Parameter-name inlay hints at call sites, and a narrow slice of
+//! inferred-type hints for `const`/`var` declarations.
 //!
 //! For each `callee(arg0, arg1, ...)` where `callee` resolves to a
 //! known function with named parameters, emits a hint of the form
 //! `name:` immediately before each argument. Skips arguments that are
-//! already written as `name: value` (Zig's named-argument syntax) so we
-//! don't double-label them. Does not attempt inferred-type hints — that
-//! needs type analysis this analyzer doesn't have yet.
+//! already written as `name: value` (Zig's named-argument syntax), or
+//! that are themselves a bare identifier already named like the
+//! parameter (`visit(tree)` where the parameter is also `tree`) — either
+//! way the hint would just repeat text already on screen.
+//!
+//! General inferred-type hints need real type inference this analyzer
+//! doesn't have. But a declaration initialized directly with a literal
+//! (`const x = "hello";`) doesn't need any — the type is determined by
+//! the literal's own syntax, no analysis required. `collectTypeHints`
+//! covers exactly that narrow, unambiguous case (string literals for
+//! now), not general expressions.
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -23,6 +32,61 @@ pub const Hint = struct {
 pub fn freeHints(gpa: std.mem.Allocator, hints: []const Hint) void {
     for (hints) |h| gpa.free(h.label);
     gpa.free(hints);
+}
+
+/// Collects inferred-type hints for `const`/`var` declarations that have
+/// no explicit type annotation and are initialized directly with a
+/// literal this module knows how to name the type of (currently: string
+/// literals, whose type is `*const [N:0]u8`). Covers top-level
+/// declarations and the immediate body of each function — the same scope
+/// boundary `resolve.zig`'s local resolution uses.
+pub fn collectTypeHints(gpa: std.mem.Allocator, ast: Ast) ![]const Hint {
+    var out: std.ArrayList(Hint) = .empty;
+    errdefer {
+        for (out.items) |h| gpa.free(h.label);
+        out.deinit(gpa);
+    }
+
+    for (ast.rootDecls()) |node| {
+        try maybeCollectVarDeclTypeHint(gpa, ast, node, &out);
+        if (ast.nodeTag(node) != .fn_decl) continue;
+        const body_node = (ast.nodeData(node).node_and_node)[1];
+        var buf: [2]Ast.Node.Index = undefined;
+        const stmts = ast.blockStatements(&buf, body_node) orelse continue;
+        for (stmts) |stmt| try maybeCollectVarDeclTypeHint(gpa, ast, stmt, &out);
+    }
+
+    return out.toOwnedSlice(gpa);
+}
+
+fn maybeCollectVarDeclTypeHint(gpa: std.mem.Allocator, ast: Ast, node: Ast.Node.Index, out: *std.ArrayList(Hint)) !void {
+    switch (ast.nodeTag(node)) {
+        .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {},
+        else => return,
+    }
+    const var_decl = ast.fullVarDecl(node) orelse return;
+    if (var_decl.ast.type_node.unwrap() != null) return; // already annotated
+    const init_node = var_decl.ast.init_node.unwrap() orelse return;
+    const label = (try inferredTypeLabel(gpa, ast, init_node)) orelse return;
+    errdefer gpa.free(label);
+
+    const name_token = var_decl.ast.mut_token + 1;
+    const loc = ast.tokenLocation(0, name_token);
+    try out.append(gpa, .{
+        .line = @intCast(loc.line),
+        .character = @intCast(loc.column + ast.tokenSlice(name_token).len),
+        .label = label,
+    });
+}
+
+/// Owned type-annotation text (e.g. `": *const [5:0]u8"`), or `null` when
+/// `init_node` isn't a literal kind this module infers the type of.
+fn inferredTypeLabel(gpa: std.mem.Allocator, ast: Ast, init_node: Ast.Node.Index) !?[]u8 {
+    if (ast.nodeTag(init_node) != .string_literal) return null;
+    const raw = ast.tokenSlice(ast.nodeMainToken(init_node));
+    const decoded = std.zig.string_literal.parseAlloc(gpa, raw) catch return null;
+    defer gpa.free(decoded);
+    return try std.fmt.allocPrint(gpa, ": *const [{d}:0]u8", .{decoded.len});
 }
 
 /// Extracts parameter names from a function's signature source
@@ -131,7 +195,8 @@ pub fn collect(
         }
         if (names.len == 0) continue;
 
-        var arg_starts: std.ArrayList(Ast.TokenIndex) = .empty;
+        const Arg = struct { start: Ast.TokenIndex, end: Ast.TokenIndex };
+        var arg_starts: std.ArrayList(Arg) = .empty;
         defer arg_starts.deinit(gpa);
 
         var depth: i32 = 0;
@@ -143,12 +208,12 @@ pub fn collect(
                 .r_paren, .r_bracket, .r_brace => {
                     depth -= 1;
                     if (depth == 0 and ast.tokenTag(t) == .r_paren) {
-                        if (arg_start_token) |start| try arg_starts.append(gpa, start);
+                        if (arg_start_token) |start| try arg_starts.append(gpa, .{ .start = start, .end = t - 1 });
                         break;
                     }
                 },
                 .comma => if (depth == 1) {
-                    if (arg_start_token) |start| try arg_starts.append(gpa, start);
+                    if (arg_start_token) |start| try arg_starts.append(gpa, .{ .start = start, .end = t - 1 });
                     arg_start_token = null;
                 },
                 else => {
@@ -161,9 +226,9 @@ pub fn collect(
 
         if (options.exclude_single_argument and arg_starts.items.len == 1) continue;
 
-        for (arg_starts.items, 0..) |start, arg_i| {
+        for (arg_starts.items, 0..) |arg, arg_i| {
             if (arg_i >= names.len) break;
-            try maybeAppendHint(gpa, ast, &out, start, names[arg_i]);
+            try maybeAppendHint(gpa, ast, &out, arg.start, arg.end, names[arg_i]);
         }
     }
 
@@ -175,12 +240,24 @@ fn maybeAppendHint(
     ast: Ast,
     out: *std.ArrayList(Hint),
     arg_start: Ast.TokenIndex,
+    arg_end: Ast.TokenIndex,
     name: []const u8,
 ) !void {
     // Skip if the argument already uses named syntax: `name: expr`.
     if (arg_start + 1 < ast.tokens.len and
         ast.tokenTag(arg_start) == .identifier and
         ast.tokenTag(arg_start + 1) == .colon and
+        std.mem.eql(u8, ast.tokenSlice(arg_start), name))
+    {
+        return;
+    }
+
+    // Skip if the whole argument is a single bare identifier already
+    // named after the parameter (`add(tree)` where the parameter is also
+    // `tree`) — the hint would just repeat what's already on screen
+    // (`tree: tree`), matching rust-analyzer/clangd's convention.
+    if (arg_start == arg_end and
+        ast.tokenTag(arg_start) == .identifier and
         std.mem.eql(u8, ast.tokenSlice(arg_start), name))
     {
         return;
@@ -213,4 +290,38 @@ test "paramNamesFromSignature skips bare anytype" {
     const names = try paramNamesFromSignature(gpa, "fn id(anytype) @TypeOf(x)");
     defer gpa.free(names);
     try testing.expectEqual(@as(usize, 0), names.len);
+}
+
+test "collectTypeHints infers a string literal's type for an unannotated top-level const" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "pub const prose_title = \"Missing doc comment\";\n", .zig);
+    defer ast.deinit(gpa);
+
+    const hints = try collectTypeHints(gpa, ast);
+    defer freeHints(gpa, hints);
+
+    try testing.expectEqual(@as(usize, 1), hints.len);
+    try testing.expectEqual(@as(u32, 0), hints[0].line);
+    try testing.expectEqualStrings(": *const [19:0]u8", hints[0].label); // "Missing doc comment" is 19 bytes
+}
+
+test "collectTypeHints skips a declaration that already has a type annotation" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "const x: []const u8 = \"hi\";\n", .zig);
+    defer ast.deinit(gpa);
+
+    const hints = try collectTypeHints(gpa, ast);
+    defer freeHints(gpa, hints);
+    try testing.expectEqual(@as(usize, 0), hints.len);
+}
+
+test "collectTypeHints finds a local string const inside a function body" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa, "fn f() void {\n    const greeting = \"hi\";\n    _ = greeting;\n}\n", .zig);
+    defer ast.deinit(gpa);
+
+    const hints = try collectTypeHints(gpa, ast);
+    defer freeHints(gpa, hints);
+    try testing.expectEqual(@as(usize, 1), hints.len);
+    try testing.expectEqualStrings(": *const [2:0]u8", hints[0].label);
 }
