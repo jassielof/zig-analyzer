@@ -19,3 +19,6 @@
 [submodule "references/zigscient"]
 	path = references/zigscient
 	url = https://github.com/llogick/zigscient
+[submodule "dependencies/docent"]
+	path = dependencies/docent
+	url = https://github.com/jassielof/docent
