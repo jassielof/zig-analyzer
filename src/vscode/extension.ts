@@ -1,8 +1,6 @@
 // Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) rather than auto-downloaded/managed; see project plan §5.
 
 // TODO: On the manfiest dependencies (build.zig.zon), it should be able to fetch the version of the dependency and show it, this mainly for path-based dependencies, url-based ones are excluded as needs more work at the moment. Ideally, for URL/Git-based dependencies we could also achieve it, since these are also locally cached under the new `zig-pkg` cache dir.
-// TODO: Doc comments aren't being rendered on hover still, fix it, specially for stdlib, nor dependencies, check the references directory for other lsp implementations to learn and do better.
-// TODO: There are no inlay hints yet, at least exposed as configuration in vscode settings.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -50,12 +48,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (
         e.affectsConfiguration("zigAnalyzer.formatter") ||
-        e.affectsConfiguration("zigAnalyzer.zigPath")
+        e.affectsConfiguration("zigAnalyzer.zigPath") ||
+        e.affectsConfiguration("zigAnalyzer.inlayHints")
       ) {
         void client?.sendNotification("workspace/didChangeConfiguration", {
           settings: {
             formatter: getFormatterConfig(),
             zigPath: getZigPath(),
+            inlayHints: getInlayHintsConfig(),
           },
         });
       }
@@ -88,6 +88,7 @@ async function start(): Promise<void> {
     initializationOptions: {
       formatter: getFormatterConfig(),
       zigPath: getZigPath(),
+      inlayHints: getInlayHintsConfig(),
     },
   };
 
@@ -145,6 +146,21 @@ function getZigPath(): string {
     .getConfiguration("zigAnalyzer")
     .get<string>("zigPath", "zig");
   return configured || "zig";
+}
+
+interface InlayHintsConfig {
+  enable: boolean;
+  parameterNames: boolean;
+  excludeSingleArgument: boolean;
+}
+
+function getInlayHintsConfig(): InlayHintsConfig {
+  const config = vscode.workspace.getConfiguration("zigAnalyzer.inlayHints");
+  return {
+    enable: config.get<boolean>("enable", true),
+    parameterNames: config.get<boolean>("parameterNames", true),
+    excludeSingleArgument: config.get<boolean>("excludeSingleArgument", true),
+  };
 }
 
 interface BuildStep {

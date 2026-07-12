@@ -134,6 +134,21 @@
             "--stdin"
           ],
           "description": "Arguments passed to zigAnalyzer.formatter.command. The default runs the standard, zero-config `zig fmt --stdin`."
+        },
+        "zigAnalyzer.inlayHints.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inlay hints from zig-analyzer (parameter names at call sites). Requires the editor's Inlay Hints setting to also be on."
+        },
+        "zigAnalyzer.inlayHints.parameterNames": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter-name inlay hints before call-site arguments."
+        },
+        "zigAnalyzer.inlayHints.excludeSingleArgument": {
+          "type": "boolean",
+          "default": true,
+          "description": "Omit parameter-name inlay hints for calls with exactly one argument."
         }
       }
     },

@@ -81,6 +81,11 @@ fn paramNameOf(part: []const u8) ?[]const u8 {
     return name;
 }
 
+pub const CollectOptions = struct {
+    /// When true, skip calls that have exactly one argument (ZLS default).
+    exclude_single_argument: bool = true,
+};
+
 /// Collects parameter-name inlay hints for every resolvable call in `ast`.
 /// `lookupSignature` returns a function's signature source for a callee
 /// name (and optional `base.field` access), or `null` if unknown.
@@ -90,7 +95,10 @@ pub fn collect(
     item_tree: ItemTree,
     lookupSignature: *const fn (ctx: *anyopaque, base: ?[]const u8, name: []const u8) ?[]const u8,
     lookup_ctx: *anyopaque,
+    options: CollectOptions,
 ) ![]const Hint {
+    _ = item_tree; // reserved for future local-resolution of callees
+
     var out: std.ArrayList(Hint) = .empty;
     errdefer {
         for (out.items) |h| gpa.free(h.label);
@@ -123,9 +131,10 @@ pub fn collect(
         }
         if (names.len == 0) continue;
 
-        // Walk arguments between this `(` and its matching `)`.
+        var arg_starts: std.ArrayList(Ast.TokenIndex) = .empty;
+        defer arg_starts.deinit(gpa);
+
         var depth: i32 = 0;
-        var arg_index: usize = 0;
         var arg_start_token: ?Ast.TokenIndex = null;
         var t = open_paren;
         while (t < ast.tokens.len) : (t += 1) {
@@ -134,22 +143,12 @@ pub fn collect(
                 .r_paren, .r_bracket, .r_brace => {
                     depth -= 1;
                     if (depth == 0 and ast.tokenTag(t) == .r_paren) {
-                        // Final argument (if any) ends here.
-                        if (arg_start_token) |start| {
-                            if (arg_index < names.len) {
-                                try maybeAppendHint(gpa, ast, &out, start, names[arg_index]);
-                            }
-                        }
+                        if (arg_start_token) |start| try arg_starts.append(gpa, start);
                         break;
                     }
                 },
                 .comma => if (depth == 1) {
-                    if (arg_start_token) |start| {
-                        if (arg_index < names.len) {
-                            try maybeAppendHint(gpa, ast, &out, start, names[arg_index]);
-                        }
-                    }
-                    arg_index += 1;
+                    if (arg_start_token) |start| try arg_starts.append(gpa, start);
                     arg_start_token = null;
                 },
                 else => {
@@ -160,7 +159,12 @@ pub fn collect(
             }
         }
 
-        _ = item_tree; // reserved for future local-resolution of callees
+        if (options.exclude_single_argument and arg_starts.items.len == 1) continue;
+
+        for (arg_starts.items, 0..) |start, arg_i| {
+            if (arg_i >= names.len) break;
+            try maybeAppendHint(gpa, ast, &out, start, names[arg_i]);
+        }
     }
 
     return try out.toOwnedSlice(gpa);

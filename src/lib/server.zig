@@ -14,6 +14,7 @@ const parse = @import("analysis/queries/parse.zig");
 const item_tree = @import("analysis/queries/item_tree.zig");
 const resolve = @import("analysis/queries/resolve.zig");
 const imports = @import("analysis/queries/imports.zig");
+const packages_mod = @import("analysis/queries/packages.zig");
 const doc_comments = @import("analysis/queries/doc_comments.zig");
 const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
 const formatting = @import("formatting.zig");
@@ -64,6 +65,14 @@ pub const Server = struct {
     /// Absolute path to Zig's `lib/` directory, discovered via `zig env`.
     /// Used to resolve `@import("std")` to the local stdlib. Owned.
     zig_lib_dir: ?[]const u8 = null,
+    /// Zig's global package cache (`…/zig`), from `zig env`. Owned.
+    zig_global_cache_dir: ?[]const u8 = null,
+    /// Path-based packages from workspace `build.zig.zon` files. Owned keys/values.
+    packages: packages_mod.PackageMap = .empty,
+    /// Inlay hint settings (mirrored from VS Code `zigAnalyzer.inlayHints.*`).
+    inlay_hints_enable: bool = true,
+    inlay_hints_parameter_names: bool = true,
+    inlay_hints_exclude_single_argument: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, io: Io) Server {
         return .{ .gpa = gpa, .io = io, .documents = .init(gpa) };
@@ -76,6 +85,14 @@ pub const Server = struct {
         self.freeFormatterConfigIfOwned();
         if (self.zig_exe_owned) self.gpa.free(self.zig_exe);
         if (self.zig_lib_dir) |d| self.gpa.free(d);
+        if (self.zig_global_cache_dir) |d| self.gpa.free(d);
+        packages_mod.clearPackages(self.gpa, &self.packages);
+        self.packages.deinit(self.gpa);
+    }
+
+    fn findImportsFor(self: *Server, ast: Ast, importer_uri: []const u8) ![]const imports.Import {
+        self.ensurePackagesForUri(importer_uri);
+        return imports.findImports(self.gpa, ast, importer_uri, self.zig_lib_dir, &self.packages);
     }
 
     fn freeFormatterConfigIfOwned(self: *Server) void {
@@ -110,6 +127,11 @@ pub const Server = struct {
         command: ?[]const u8 = null,
         args: ?[]const []const u8 = null,
     };
+    const InlayHintsOptions = struct {
+        enable: ?bool = null,
+        parameterNames: ?bool = null,
+        excludeSingleArgument: ?bool = null,
+    };
     const ServerOptions = struct {
         formatter: ?FormatterOptions = null,
         /// Path to the `zig` executable (same setting the VS Code
@@ -117,12 +139,12 @@ pub const Server = struct {
         /// `zig env` so `@import("std")` resolves against the local
         /// stdlib rather than anything on the web.
         zigPath: ?[]const u8 = null,
+        inlayHints: ?InlayHintsOptions = null,
     };
 
     /// Shared by `initialize`'s `initializationOptions` and
     /// `workspace/didChangeConfiguration`'s `settings` — both carry the
-    /// same `{ formatter: { command, args }, zigPath }` shape (see
-    /// extension.ts).
+    /// same `{ formatter, zigPath, inlayHints }` shape (see extension.ts).
     fn applyOptions(self: *Server, options_value: std.json.Value) void {
         // Absent options (no `initializationOptions`, or a
         // `didChangeConfiguration` for an unrelated section) is the
@@ -143,15 +165,19 @@ pub const Server = struct {
             };
         }
 
-        const formatter = parsed.value.formatter orelse {
-            self.discoverZigLibDir();
-            return;
-        };
-        const command = formatter.command orelse "zig";
-        const args = formatter.args orelse &[_][]const u8{ "fmt", "--stdin" };
-        self.setFormatterConfig(command, args) catch |err| {
-            std.log.err("failed to apply formatter config: {t}", .{err});
-        };
+        if (parsed.value.inlayHints) |ih| {
+            if (ih.enable) |v| self.inlay_hints_enable = v;
+            if (ih.parameterNames) |v| self.inlay_hints_parameter_names = v;
+            if (ih.excludeSingleArgument) |v| self.inlay_hints_exclude_single_argument = v;
+        }
+
+        if (parsed.value.formatter) |formatter| {
+            const command = formatter.command orelse "zig";
+            const args = formatter.args orelse &[_][]const u8{ "fmt", "--stdin" };
+            self.setFormatterConfig(command, args) catch |err| {
+                std.log.err("failed to apply formatter config: {t}", .{err});
+            };
+        }
         self.discoverZigLibDir();
     }
 
@@ -186,7 +212,10 @@ pub const Server = struct {
             return;
         }
 
-        const Env = struct { lib_dir: ?[]const u8 = null };
+        const Env = struct {
+            lib_dir: ?[]const u8 = null,
+            global_cache_dir: ?[]const u8 = null,
+        };
         const source = self.gpa.dupeZ(u8, result.stdout) catch return;
         defer self.gpa.free(source);
 
@@ -198,10 +227,16 @@ pub const Server = struct {
         };
         defer std.zon.parse.free(self.gpa, env);
 
-        const lib_dir = env.lib_dir orelse return;
-        const owned = self.gpa.dupe(u8, lib_dir) catch return;
-        if (self.zig_lib_dir) |old| self.gpa.free(old);
-        self.zig_lib_dir = owned;
+        if (env.lib_dir) |lib_dir| {
+            const owned = self.gpa.dupe(u8, lib_dir) catch return;
+            if (self.zig_lib_dir) |old| self.gpa.free(old);
+            self.zig_lib_dir = owned;
+        }
+        if (env.global_cache_dir) |cache_dir| {
+            const owned = self.gpa.dupe(u8, cache_dir) catch return;
+            if (self.zig_global_cache_dir) |old| self.gpa.free(old);
+            self.zig_global_cache_dir = owned;
+        }
     }
 
     /// Dispatches one JSON-RPC message body. Writes a framed response to
@@ -254,6 +289,8 @@ pub const Server = struct {
             try self.handleCodeLens(writer, msg);
         } else if (std.mem.eql(u8, msg.method, "textDocument/inlayHint")) {
             try self.handleInlayHint(writer, msg);
+        } else if (std.mem.eql(u8, msg.method, "textDocument/documentLink")) {
+            try self.handleDocumentLink(writer, msg);
         } else if (msg.isNotification()) {
             // Unknown notifications are silently ignored, per spec.
         } else if (self.phase == .uninitialized) {
@@ -269,12 +306,20 @@ pub const Server = struct {
             return;
         }
 
-        const Params = struct { initializationOptions: std.json.Value = .null };
+        const Params = struct {
+            initializationOptions: std.json.Value = .null,
+            workspaceFolders: ?[]const WorkspaceFolder = null,
+            rootUri: ?[]const u8 = null,
+        };
         if (std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true })) |parsed| {
             defer parsed.deinit();
             self.applyOptions(parsed.value.initializationOptions);
+            // Need lib + package-cache dirs before resolving zon deps.
+            if (self.zig_lib_dir == null or self.zig_global_cache_dir == null) self.discoverZigLibDir();
+            self.reloadPackagesFromFolders(parsed.value.workspaceFolders, parsed.value.rootUri);
         } else |err| {
             std.log.err("ignoring malformed initialize params: {t}", .{err});
+            if (self.zig_lib_dir == null) self.discoverZigLibDir();
         }
         // Even with no initializationOptions, try to find the local
         // stdlib via whatever `zig` is on PATH — needed for
@@ -309,6 +354,7 @@ pub const Server = struct {
                 } = .{},
                 codeLensProvider: struct {} = .{},
                 inlayHintProvider: bool = true,
+                documentLinkProvider: bool = true,
             } = .{},
             serverInfo: struct {
                 name: []const u8 = "zig-analyzer",
@@ -317,6 +363,46 @@ pub const Server = struct {
         };
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, InitializeResult{});
         self.phase = .initializing;
+    }
+
+    const WorkspaceFolder = struct { uri: []const u8, name: []const u8 = "" };
+
+    fn reloadPackagesFromFolders(
+        self: *Server,
+        folders: ?[]const WorkspaceFolder,
+        root_uri: ?[]const u8,
+    ) void {
+        packages_mod.clearPackages(self.gpa, &self.packages);
+
+        if (folders) |list| {
+            for (list) |folder| {
+                const path = uri_util.toFsPath(self.gpa, folder.uri) catch continue;
+                defer self.gpa.free(path);
+                packages_mod.loadDepsFromWorkspace(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages) catch |err| {
+                    std.log.err("failed to load path deps from {s}: {t}", .{ path, err });
+                };
+            }
+            return;
+        }
+
+        if (root_uri) |uri| {
+            const path = uri_util.toFsPath(self.gpa, uri) catch return;
+            defer self.gpa.free(path);
+            packages_mod.loadDepsFromWorkspace(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages) catch |err| {
+                std.log.err("failed to load path deps from {s}: {t}", .{ path, err });
+            };
+        }
+    }
+
+    /// If packages aren't loaded yet (e.g. initialize had no workspace
+    /// folders), discover them by walking up from this file's directory.
+    fn ensurePackagesForUri(self: *Server, uri: []const u8) void {
+        if (self.packages.count() > 0) return;
+        const path = uri_util.toFsPath(self.gpa, uri) catch return;
+        defer self.gpa.free(path);
+        packages_mod.loadDepsWalkingUpFromFile(self.gpa, self.io, path, self.zig_global_cache_dir, &self.packages) catch |err| {
+            std.log.err("failed to load packages near {s}: {t}", .{ path, err });
+        };
     }
 
     fn handleInitialized(self: *Server, msg: jsonrpc.Message) void {
@@ -486,7 +572,7 @@ pub const Server = struct {
         // it — that was the remaining half of the go-to-definition FIXME
         // (the binding name was already redirected in redirectImportBinding).
         if (try self.definitionForImportString(uri, position)) |any| {
-            defer self.gpa.free(any.uri);
+            defer self.freeAnyDefinition(any);
             const LocationResult = struct { uri: []const u8, range: Range };
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
                 .uri = any.uri,
@@ -502,10 +588,10 @@ pub const Server = struct {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
         };
-        defer self.gpa.free(initial.uri);
+        defer self.freeAnyDefinition(initial);
 
         const any = try self.redirectImportBinding(initial.uri, initial.def);
-        defer self.gpa.free(any.uri);
+        defer self.freeAnyDefinition(any);
 
         const LocationResult = struct { uri: []const u8, range: Range };
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, LocationResult{
@@ -524,7 +610,7 @@ pub const Server = struct {
     fn definitionForImportString(self: *Server, uri: []const u8, position: Position) !?AnyDefinition {
         const doc = self.documents.get(uri) orelse return null;
         const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
-        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri, self.zig_lib_dir);
+        const imports_list = try self.findImportsFor(parsed_file.ast, uri);
         defer imports.freeImports(self.gpa, imports_list);
 
         const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
@@ -547,11 +633,11 @@ pub const Server = struct {
     /// unchanged. Always returns an owned `uri`, matching
     /// `resolveRequestPosition`'s contract.
     fn redirectImportBinding(self: *Server, uri: []const u8, def: resolve.Definition) !AnyDefinition {
-        const doc = self.documents.get(uri) orelse return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
-        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
-        const decl_name = nameOfDefinition(parsed_file.ast, def);
+        const parsed = try self.parseUri(uri) orelse return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
+        defer parsed.deinit(self);
+        const decl_name = nameOfDefinition(parsed.ast, def);
 
-        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri, self.zig_lib_dir);
+        const imports_list = try self.findImportsFor(parsed.ast, uri);
         defer imports.freeImports(self.gpa, imports_list);
         for (imports_list) |imp| {
             if (!std.mem.eql(u8, imp.name, decl_name)) continue;
@@ -637,7 +723,7 @@ pub const Server = struct {
             try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as(?u8, null));
             return;
         };
-        defer self.gpa.free(any.uri);
+        defer self.freeAnyDefinition(any);
 
         // Doctest + declaration docs live on the *declaration's* file.
         var doctest: ?[]u8 = null;
@@ -651,16 +737,51 @@ pub const Server = struct {
             if (resolve.findDoctest(target.ast, decl_name)) |raw| {
                 doctest = try formatDoctestBody(self.gpa, raw);
             }
-            // Import bindings show the *imported file's* container docs,
-            // not (usually nonexistent) docs on the local `const`.
-            if (try self.containerDocsForImportBinding(uri, decl_name)) |container| {
+            // Import re-exports / module namespaces: show the target file's
+            // `//!` container docs (`std.fmt` → fmt.zig's header).
+            if (std.mem.startsWith(u8, any.def.signature, "@import(")) {
+                docs = try doc_comments.getContainerDocComments(self.gpa, target.ast);
+            } else if (try self.containerDocsForImportBinding(uri, decl_name)) |container| {
+                // Import bindings show the *imported file's* container docs,
+                // not (usually nonexistent) docs on the local `const`.
                 docs = container;
             } else {
                 docs = try doc_comments.getDocCommentsForRootName(self.gpa, target.ast, decl_name);
             }
         }
 
-        const value = try formatHoverMarkdown(self.gpa, any.def.signature, docs, doctest);
+        var link_uri: ?[]const u8 = null;
+        var link_label: ?[]const u8 = null;
+        var owned_link_uri: ?[]u8 = null;
+        var owned_link_label: ?[]u8 = null;
+        defer if (owned_link_uri) |u| self.gpa.free(u);
+        defer if (owned_link_label) |l| self.gpa.free(l);
+
+        // Prefer the import path as the link label when this is an import binding.
+        if (self.documents.get(uri)) |doc| {
+            const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+            const imports_list = try self.findImportsFor(parsed_file.ast, uri);
+            defer imports.freeImports(self.gpa, imports_list);
+            const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
+            if (resolve.identifierTokenAt(parsed_file.ast, offset)) |tok| {
+                const name = parsed_file.ast.tokenSlice(tok);
+                for (imports_list) |imp| {
+                    if (!std.mem.eql(u8, imp.name, name)) continue;
+                    if (imp.uri) |target| {
+                        owned_link_uri = try self.gpa.dupe(u8, target);
+                        owned_link_label = try self.gpa.dupe(u8, imp.path);
+                        link_uri = owned_link_uri;
+                        link_label = owned_link_label;
+                    }
+                    break;
+                }
+            }
+        }
+        if (link_uri == null and std.mem.startsWith(u8, any.def.signature, "@import(")) {
+            link_uri = any.uri;
+        }
+
+        const value = try formatHoverMarkdown(self.gpa, any.def.signature, docs, doctest, link_uri, link_label);
         defer self.gpa.free(value);
 
         // Hover's range highlights the hovered word in the *current*
@@ -685,7 +806,7 @@ pub const Server = struct {
     fn hoverForImportString(self: *Server, uri: []const u8, position: Position) !?HoverPayload {
         const doc = self.documents.get(uri) orelse return null;
         const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
-        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, uri, self.zig_lib_dir);
+        const imports_list = try self.findImportsFor(parsed_file.ast, uri);
         defer imports.freeImports(self.gpa, imports_list);
 
         const offset = resolve.positionToOffset(parsed_file.ast.source, .{ .line = position.line, .character = position.character });
@@ -705,7 +826,7 @@ pub const Server = struct {
         defer if (docs) |d| self.gpa.free(d);
         docs = try self.containerDocsForUri(target_uri);
 
-        const value = try formatHoverMarkdown(self.gpa, signature, docs, null);
+        const value = try formatHoverMarkdown(self.gpa, signature, docs, null, target_uri, imp.path);
         return .{ .value = value, .range = range };
     }
 
@@ -714,7 +835,7 @@ pub const Server = struct {
     fn containerDocsForImportBinding(self: *Server, importer_uri: []const u8, decl_name: []const u8) !?[]const u8 {
         const doc = self.documents.get(importer_uri) orelse return null;
         const parsed_file = try parse.parse(&self.parse_cache, self.gpa, importer_uri, doc.text, doc.revision);
-        const imports_list = try imports.findImports(self.gpa, parsed_file.ast, importer_uri, self.zig_lib_dir);
+        const imports_list = try self.findImportsFor(parsed_file.ast, importer_uri);
         defer imports.freeImports(self.gpa, imports_list);
         for (imports_list) |imp| {
             if (!std.mem.eql(u8, imp.name, decl_name)) continue;
@@ -812,7 +933,14 @@ pub const Server = struct {
         return .{ .start = position, .end = position };
     }
 
-    fn formatHoverMarkdown(gpa: std.mem.Allocator, signature: []const u8, docs: ?[]const u8, doctest: ?[]const u8) ![]u8 {
+    fn formatHoverMarkdown(
+        gpa: std.mem.Allocator,
+        signature: []const u8,
+        docs: ?[]const u8,
+        doctest: ?[]const u8,
+        link_uri: ?[]const u8,
+        link_label: ?[]const u8,
+    ) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(gpa);
 
@@ -827,6 +955,13 @@ pub const Server = struct {
                 try out.appendSlice(gpa, "\n\n");
                 try out.appendSlice(gpa, d);
             }
+        }
+
+        // One markdown link for the whole target path — avoids VS Code
+        // auto-linkifying `commands/check.zig` into separate fragments.
+        if (link_uri) |uri| {
+            const label = link_label orelse uri;
+            try out.print(gpa, "\n\n[{s}]({s})", .{ label, uri });
         }
 
         if (doctest) |dt| {
@@ -846,13 +981,26 @@ pub const Server = struct {
         return try out.toOwnedSlice(gpa);
     }
 
-    const AnyDefinition = struct { uri: []const u8, def: resolve.Definition };
+    const AnyDefinition = struct {
+        uri: []const u8,
+        def: resolve.Definition,
+        /// When true, `def.signature` was allocated with `gpa` and must be freed
+        /// with `freeAnyDefinition`. Cross-file disk resolves own their signature
+        /// because the underlying AST is freed before the result is used.
+        signature_owned: bool = false,
+    };
+
+    fn freeAnyDefinition(self: *Server, any: AnyDefinition) void {
+        self.gpa.free(any.uri);
+        if (any.signature_owned) self.gpa.free(any.def.signature);
+    }
 
     /// Shared by `textDocument/definition` and `textDocument/hover`: both
     /// need to resolve a position to a declaration, one to show its
     /// location, the other its signature. Tries local resolution first
     /// (params, immediate-body locals, this file's item tree), then
-    /// cross-file via `@import` bindings. The returned `uri` is always an
+    /// cross-file via `@import` bindings and dotted field chains
+    /// (`std.fmt`, `std.debug.print`). The returned `uri` is always an
     /// owned copy — same-file or cross-file — so callers have exactly one
     /// ownership rule to follow.
     fn resolveRequestPosition(self: *Server, uri: []const u8, position: Position) !?AnyDefinition {
@@ -864,9 +1012,15 @@ pub const Server = struct {
         if (resolve.resolveAt(parsed_file.ast, tree.*, pos)) |def| {
             return .{ .uri = try self.gpa.dupe(u8, uri), .def = def };
         }
-        if (resolve.fieldAccessAt(parsed_file.ast, pos)) |fa| {
-            if (try self.resolveCrossFile(uri, parsed_file.ast, fa)) |cross| {
-                return cross; // already owns its uri
+
+        // Prefer a full dotted chain so `std.debug.print` and `std.fmt`
+        // resolve through re-exports, including into closed stdlib files.
+        if (try resolve.fieldAccessChainAt(self.gpa, parsed_file.ast, pos)) |chain| {
+            defer self.gpa.free(chain);
+            if (chain.len >= 2) {
+                if (try self.resolveFieldChain(uri, parsed_file.ast, chain)) |cross| {
+                    return cross;
+                }
             }
         }
         return null;
@@ -874,37 +1028,95 @@ pub const Server = struct {
 
     const CrossFileDefinition = AnyDefinition;
 
-    /// Follows `field_access.base` through `importer_ast`'s `@import`
-    /// bindings into the imported file's item tree — reading only that
-    /// file's stable public shape, never its body/local resolution (see
-    /// project plan §1.3, §Phase 6). Only resolves into files the client
-    /// already has open (tracked in `self.documents`): there's no
-    /// filesystem access here, so an import target that isn't open in the
-    /// editor can't be resolved yet.
+    /// Walks `chain` (outermost→innermost, e.g. `["std","debug","print"]`)
+    /// starting from an `@import` binding in `importer_ast`. Intermediate
+    /// hops that are themselves `@import("…")` re-exports are followed into
+    /// the imported file (loaded from disk when not open). The final name
+    /// resolves to a top-level definition in the file reached.
+    fn resolveFieldChain(
+        self: *Server,
+        importer_uri: []const u8,
+        importer_ast: Ast,
+        chain: []const []const u8,
+    ) !?CrossFileDefinition {
+        if (chain.len < 2) return null;
+
+        const imports_list = try self.findImportsFor(importer_ast, importer_uri);
+        defer imports.freeImports(self.gpa, imports_list);
+
+        var current_uri: ?[]const u8 = null;
+        for (imports_list) |imp| {
+            if (!std.mem.eql(u8, imp.name, chain[0])) continue;
+            current_uri = imp.uri;
+            break;
+        }
+        var owned_uri: []const u8 = try self.gpa.dupe(u8, current_uri orelse return null);
+        var uri_consumed = false;
+        defer if (!uri_consumed) self.gpa.free(owned_uri);
+
+        var hop: usize = 1;
+        while (hop < chain.len) : (hop += 1) {
+            const name = chain[hop];
+            const parsed = try self.parseUri(owned_uri) orelse return null;
+            defer parsed.deinit(self);
+
+            // Last hop: resolve the definition (and optionally follow a
+            // final re-export for go-to-def / hover on module namespaces).
+            if (hop + 1 == chain.len) {
+                if (try imports.rootDeclImportPath(self.gpa, parsed.ast, name)) |rel| {
+                    defer self.gpa.free(rel);
+                    const next = (try imports.resolveImportUri(self.gpa, owned_uri, rel, self.zig_lib_dir, &self.packages)) orelse return null;
+                    errdefer self.gpa.free(next);
+                    const sig = try std.fmt.allocPrint(self.gpa, "@import(\"{s}\")", .{rel});
+                    self.gpa.free(owned_uri);
+                    owned_uri = next;
+                    uri_consumed = true;
+                    return .{
+                        .uri = owned_uri,
+                        .def = .{ .line = 0, .character = 0, .end_character = 0, .signature = sig },
+                        .signature_owned = true,
+                    };
+                }
+
+                var tree = try item_tree.build(self.gpa, parsed.ast);
+                defer tree.deinit(self.gpa);
+                const def = resolve.resolveTopLevel(parsed.ast, tree, name) orelse return null;
+                // Definition borrows signature from the AST — copy it before
+                // `parsed` is deinited.
+                const sig = try self.gpa.dupe(u8, def.signature);
+                uri_consumed = true;
+                return .{
+                    .uri = owned_uri,
+                    .def = .{
+                        .line = def.line,
+                        .character = def.character,
+                        .end_character = def.end_character,
+                        .signature = sig,
+                    },
+                    .signature_owned = true,
+                };
+            }
+
+            // Intermediate hop must be an `@import` re-export.
+            const rel = (try imports.rootDeclImportPath(self.gpa, parsed.ast, name)) orelse return null;
+            defer self.gpa.free(rel);
+            const next = (try imports.resolveImportUri(self.gpa, owned_uri, rel, self.zig_lib_dir, &self.packages)) orelse return null;
+            self.gpa.free(owned_uri);
+            owned_uri = next;
+        }
+        return null;
+    }
+
+    /// Follows a single `base.field` access for callers that still use
+    /// `FieldAccess` (signature help / inlay). Delegates to the chain walker.
     fn resolveCrossFile(
         self: *Server,
         importer_uri: []const u8,
         importer_ast: Ast,
         field_access: resolve.FieldAccess,
     ) !?CrossFileDefinition {
-        const imports_list = try imports.findImports(self.gpa, importer_ast, importer_uri, self.zig_lib_dir);
-        defer imports.freeImports(self.gpa, imports_list);
-
-        for (imports_list) |imp| {
-            if (!std.mem.eql(u8, imp.name, field_access.base)) continue;
-            const target_uri = imp.uri orelse return null;
-            const target_doc = self.documents.get(target_uri) orelse return null;
-
-            const target_parsed = try parse.parse(&self.parse_cache, self.gpa, target_uri, target_doc.text, target_doc.revision);
-            const target_tree = try item_tree.itemTree(&self.item_tree_cache, self.gpa, target_uri, target_parsed.ast, target_doc.revision);
-
-            const def = resolve.resolveTopLevel(target_parsed.ast, target_tree.*, field_access.field) orelse return null;
-            // `target_uri` points into `imports_list`, which this
-            // function frees before returning — hand back an owned copy
-            // rather than a pointer into memory that's about to be freed.
-            return .{ .uri = try self.gpa.dupe(u8, target_uri), .def = def };
-        }
-        return null;
+        const chain = [_][]const u8{ field_access.base, field_access.field };
+        return self.resolveFieldChain(importer_uri, importer_ast, &chain);
     }
 
     // LSP `SymbolKind`: 12 = Function, 13 = Variable.
@@ -1300,6 +1512,8 @@ pub const Server = struct {
         const callee_name = parsed_file.ast.tokenSlice(ctx.callee_token);
 
         var signature: ?[]const u8 = null;
+        var owned_sig: ?[]u8 = null;
+        defer if (owned_sig) |s| self.gpa.free(s);
 
         if (tree.find(callee_name)) |item| {
             if (item.kind == .function) signature = item.signature;
@@ -1307,12 +1521,11 @@ pub const Server = struct {
         if (signature == null) {
             if (resolve.fieldAccessAtToken(parsed_file.ast, ctx.callee_token)) |fa| {
                 if (try self.resolveCrossFile(uri, parsed_file.ast, fa)) |cross| {
-                    self.gpa.free(cross.uri);
-                    // `cross.def.signature` is borrowed from the imported
-                    // file's Ast, which stays cached in `self.parse_cache`
-                    // for the rest of this synchronous handler — safe to
-                    // use directly without copying it out.
-                    signature = cross.def.signature;
+                    defer self.freeAnyDefinition(cross);
+                    // Copy out — cross may own a signature backed by a
+                    // temporary disk AST that freeAnyDefinition releases.
+                    owned_sig = try self.gpa.dupe(u8, cross.def.signature);
+                    signature = owned_sig;
                 }
             }
         }
@@ -1388,28 +1601,32 @@ pub const Server = struct {
         importer_uri: []const u8,
         importer_ast: Ast,
         tree: item_tree.ItemTree,
+        /// Last signature returned from a cross-file lookup (owned).
+        owned_sig: ?[]const u8 = null,
     };
 
     fn inlayLookupSignature(ctx_ptr: *anyopaque, base: ?[]const u8, name: []const u8) ?[]const u8 {
         const ctx: *InlayLookupCtx = @ptrCast(@alignCast(ctx_ptr));
         if (base) |b| {
-            // Cross-file: helpers.add → look up `add` in the imported file.
-            // resolveCrossFile is async-allocating; we can't call it from a
-            // sync callback that returns a borrowed slice easily. Inline the
-            // same lookup against already-open documents.
-            const imports_list = imports.findImports(ctx.server.gpa, ctx.importer_ast, ctx.importer_uri, ctx.server.zig_lib_dir) catch return null;
-            defer imports.freeImports(ctx.server.gpa, imports_list);
-            for (imports_list) |imp| {
-                if (!std.mem.eql(u8, imp.name, b)) continue;
-                const target_uri = imp.uri orelse return null;
-                const target_doc = ctx.server.documents.get(target_uri) orelse return null;
-                const target_parsed = parse.parse(&ctx.server.parse_cache, ctx.server.gpa, target_uri, target_doc.text, target_doc.revision) catch return null;
-                const target_tree = item_tree.itemTree(&ctx.server.item_tree_cache, ctx.server.gpa, target_uri, target_parsed.ast, target_doc.revision) catch return null;
-                const item = target_tree.find(name) orelse return null;
-                if (item.kind != .function) return null;
-                return item.signature;
+            const chain = [_][]const u8{ b, name };
+            const cross = ctx.server.resolveFieldChain(ctx.importer_uri, ctx.importer_ast, &chain) catch return null;
+            const result = cross orelse return null;
+            // Stash the owned signature on the lookup ctx so it outlives
+            // this call — `collect` only needs the bytes until it finishes
+            // parsing param names for this callee.
+            if (ctx.owned_sig) |old| ctx.server.gpa.free(old);
+            if (result.signature_owned) {
+                ctx.owned_sig = result.def.signature;
+                ctx.server.gpa.free(result.uri);
+                return ctx.owned_sig;
             }
-            return null;
+            const duped = ctx.server.gpa.dupe(u8, result.def.signature) catch {
+                ctx.server.freeAnyDefinition(result);
+                return null;
+            };
+            ctx.server.gpa.free(result.uri);
+            ctx.owned_sig = duped;
+            return duped;
         }
         const item = ctx.tree.find(name) orelse return null;
         if (item.kind != .function) return null;
@@ -1427,9 +1644,14 @@ pub const Server = struct {
         };
         defer parsed.deinit();
 
+        if (!self.inlay_hints_enable or !self.inlay_hints_parameter_names) {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as([]const struct { position: Position, label: []const u8 }, &.{}));
+            return;
+        }
+
         const uri = parsed.value.textDocument.uri;
         const doc = self.documents.get(uri) orelse {
-            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, &[_]u8{});
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as([]const struct { position: Position, label: []const u8 }, &.{}));
             return;
         };
 
@@ -1441,9 +1663,13 @@ pub const Server = struct {
             .importer_uri = uri,
             .importer_ast = parsed_file.ast,
             .tree = tree.*,
+            .owned_sig = null,
         };
+        defer if (lookup_ctx.owned_sig) |s| self.gpa.free(s);
 
-        const hints = try inlay_hints.collect(self.gpa, parsed_file.ast, tree.*, inlayLookupSignature, &lookup_ctx);
+        const hints = try inlay_hints.collect(self.gpa, parsed_file.ast, tree.*, inlayLookupSignature, &lookup_ctx, .{
+            .exclude_single_argument = self.inlay_hints_exclude_single_argument,
+        });
         defer inlay_hints.freeHints(self.gpa, hints);
 
         const InlayHintResult = struct {
@@ -1467,6 +1693,49 @@ pub const Server = struct {
         }
 
         try jsonrpc.writeResult(writer, self.gpa, msg.id.?, results.items);
+    }
+
+    fn handleDocumentLink(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
+        const Params = struct { textDocument: struct { uri: []const u8 } };
+        var parsed = std.json.parseFromValue(Params, self.gpa, msg.params, .{ .ignore_unknown_fields = true }) catch {
+            try jsonrpc.writeError(writer, self.gpa, msg.id.?, .invalid_params, "invalid textDocument/documentLink params");
+            return;
+        };
+        defer parsed.deinit();
+
+        const DocumentLinkResult = struct {
+            range: Range,
+            target: []const u8,
+        };
+        var links: std.ArrayList(DocumentLinkResult) = .empty;
+        defer links.deinit(self.gpa);
+
+        const uri = parsed.value.textDocument.uri;
+        const doc = self.documents.get(uri) orelse {
+            try jsonrpc.writeResult(writer, self.gpa, msg.id.?, @as([]const DocumentLinkResult, &.{}));
+            return;
+        };
+
+        const parsed_file = try parse.parse(&self.parse_cache, self.gpa, uri, doc.text, doc.revision);
+        const imports_list = try self.findImportsFor(parsed_file.ast, uri);
+        defer imports.freeImports(self.gpa, imports_list);
+
+        for (imports_list) |imp| {
+            const target = imp.uri orelse continue;
+            const loc = parsed_file.ast.tokenLocation(0, imp.string_token);
+            const slice = parsed_file.ast.tokenSlice(imp.string_token);
+            // Whole string token — including quotes — so Ctrl+click is one
+            // link, not a fragment per `/` / `.` path segment.
+            try links.append(self.gpa, .{
+                .range = .{
+                    .start = .{ .line = @intCast(loc.line), .character = @intCast(loc.column) },
+                    .end = .{ .line = @intCast(loc.line), .character = @intCast(loc.column + slice.len) },
+                },
+                .target = target,
+            });
+        }
+
+        try jsonrpc.writeResult(writer, self.gpa, msg.id.?, links.items);
     }
 };
 
@@ -2091,6 +2360,99 @@ test "textDocument/hover on @import(\"std\") uses local stdlib docs" {
     const def_uri = def_parsed.value.object.get("result").?.object.get("uri").?.string;
     try std.testing.expect(std.mem.indexOf(u8, def_uri, "/std/std.zig") != null);
     try std.testing.expect(std.mem.startsWith(u8, def_uri, "file://"));
+}
+
+test "textDocument/hover on std.fmt shows stdlib container docs from disk" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var init_responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+    });
+    defer init_responses.deinit();
+    try std.testing.expect(server.zig_lib_dir != null);
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const std = @import(\"std\");\nfn main() void {\n    _ = std.fmt;\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    // Hover `fmt` in `std.fmt` — fmt.zig is not open; must load from disk
+    // and follow `pub const fmt = @import("fmt.zig")`.
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":2,"character":13}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result");
+    try std.testing.expect(result != null and result.? != .null);
+    const value = result.?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, value, "String formatting and parsing.") != null);
+}
+
+test "textDocument/documentLink covers the whole @import string" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/commands/check.zig","text":"//! Check command.\n\npub fn run() void {}\n"}}}
+        ,
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///proj/main.zig","text":"const check_command = @import(\"commands/check.zig\");\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/documentLink","params":{"textDocument":{"uri":"file:///proj/main.zig"}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    const links = parsed.value.object.get("result").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    try std.testing.expectEqualStrings("file:///proj/commands/check.zig", links[0].object.get("target").?.string);
+    // Entire `"commands/check.zig"` token — not split on `/` or `.`.
+    const range = links[0].object.get("range").?.object;
+    try std.testing.expectEqual(@as(i64, 0), range.get("start").?.object.get("line").?.integer);
+    const start_char = range.get("start").?.object.get("character").?.integer;
+    const end_char = range.get("end").?.object.get("character").?.integer;
+    try std.testing.expectEqual(@as(i64, "commands/check.zig".len + 2), end_char - start_char);
+
+    // Hover on the string includes one markdown link with the full path label.
+    var hover_responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///proj/main.zig"},"position":{"line":0,"character":35}}}
+    });
+    defer hover_responses.deinit();
+    var hover_parsed = try std.json.parseFromSlice(std.json.Value, gpa, hover_responses.messages.items[0], .{});
+    defer hover_parsed.deinit();
+    const hover_value = hover_parsed.value.object.get("result").?.object.get("contents").?.object.get("value").?.string;
+    try std.testing.expect(std.mem.indexOf(u8, hover_value, "[commands/check.zig](file:///proj/commands/check.zig)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover_value, "Check command.") != null);
+}
+
+test "textDocument/inlayHint respects enable=false" {
+    const gpa = std.testing.allocator;
+    var server: Server = .init(gpa, std.testing.io);
+    defer server.deinit();
+    server.inlay_hints_enable = false;
+
+    var opened = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.zig","text":"fn add(a: i32, b: i32) i32 {\n    return a + b;\n}\nfn main() void {\n    _ = add(1, 2);\n}\n"}}}
+    });
+    defer opened.deinit();
+
+    var responses = try harness.run(gpa, &server, &.{
+        \\{"jsonrpc":"2.0","id":1,"method":"textDocument/inlayHint","params":{"textDocument":{"uri":"file:///a.zig"},"range":{"start":{"line":0,"character":0},"end":{"line":10,"character":0}}}}
+    });
+    defer responses.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, responses.messages.items[0], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("result").?.array.items.len);
 }
 
 test "textDocument/codeLens reports reference counts" {

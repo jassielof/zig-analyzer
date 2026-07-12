@@ -51,7 +51,7 @@ pub fn positionToOffset(source: []const u8, pos: Position) u32 {
 
 /// Linear scan over every token; fine at the file sizes this targets for
 /// now. Could binary-search `tokenStart` if it ever shows up as hot.
-fn identifierTokenAt(ast: Ast, offset: u32) ?Ast.TokenIndex {
+pub fn identifierTokenAt(ast: Ast, offset: u32) ?Ast.TokenIndex {
     var idx: Ast.TokenIndex = 0;
     while (idx < ast.tokens.len) : (idx += 1) {
         if (ast.tokenTag(idx) != .identifier) continue;
@@ -268,6 +268,38 @@ pub fn fieldAccessAt(ast: Ast, pos: Position) ?FieldAccess {
     const offset = positionToOffset(ast.source, pos);
     const field_token = identifierTokenAt(ast, offset) orelse return null;
     return fieldAccessAtToken(ast, field_token);
+}
+
+/// Walks a dotted access leftward from the identifier under `pos`.
+/// For `std.debug.print` with the cursor on `print`, returns
+/// `["std", "debug", "print"]` (borrowed slices into `ast.source`).
+/// Returns `null` when there's no identifier at `pos`. A bare identifier
+/// (no dots) yields a one-element chain.
+pub fn fieldAccessChainAt(gpa: std.mem.Allocator, ast: Ast, pos: Position) !?[]const []const u8 {
+    const offset = positionToOffset(ast.source, pos);
+    const tip = identifierTokenAt(ast, offset) orelse return null;
+
+    var tokens: std.ArrayList(Ast.TokenIndex) = .empty;
+    defer tokens.deinit(gpa);
+    try tokens.append(gpa, tip);
+
+    var cursor = tip;
+    while (cursor >= 2) {
+        if (ast.tokenTag(cursor - 1) != .period) break;
+        if (ast.tokenTag(cursor - 2) != .identifier) break;
+        try tokens.append(gpa, cursor - 2);
+        cursor -= 2;
+    }
+
+    // tokens are tip-first; reverse into outermost-first.
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(gpa);
+    var i: usize = tokens.items.len;
+    while (i > 0) {
+        i -= 1;
+        try names.append(gpa, ast.tokenSlice(tokens.items[i]));
+    }
+    return try names.toOwnedSlice(gpa);
 }
 
 /// Collects the parameter and immediate-body local variable names in
