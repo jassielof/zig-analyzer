@@ -1,2 +1,8 @@
+# Zig
 .zig-cache
 zig-out
+
+# Node
+node_modules
+dist
+*.vsix
