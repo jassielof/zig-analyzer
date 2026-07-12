@@ -16,3 +16,6 @@
 [submodule "references/zigscient-next"]
 	path = references/zigscient-next
 	url = https://github.com/llogick/zigscient-next
+[submodule "references/zigscient"]
+	path = references/zigscient
+	url = https://github.com/llogick/zigscient
