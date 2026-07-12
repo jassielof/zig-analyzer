@@ -5,7 +5,7 @@
       "label": "build zig-analyzer",
       "type": "process",
       "options": {
-        "cwd": "${workspaceFolder:LSP}"
+        "cwd": "${workspaceFolder}"
       },
       "command": "zig",
       "args": ["build"],

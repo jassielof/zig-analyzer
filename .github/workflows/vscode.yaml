@@ -4,11 +4,23 @@ on:
   push:
     branches: [main]
     paths:
-      - "vscode/**"
+      - "src/vscode/**"
+      - "package.json"
+      - "esbuild.config.js"
+      - "eslint.config.js"
+      - "syntaxes/**"
+      - "tsconfig.json"
+      - "language-configuration.json"
       - ".github/workflows/vscode.yaml"
   pull_request:
     paths:
-      - "vscode/**"
+      - "src/vscode/**"
+      - "package.json"
+      - "esbuild.config.js"
+      - "eslint.config.js"
+      - "syntaxes/**"
+      - "tsconfig.json"
+      - "language-configuration.json"
       - ".github/workflows/vscode.yaml"
 
 concurrency:
@@ -25,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          submodules: false
       - name: Setup PNPM
         uses: pnpm/action-setup@v6
       - name: Setup Node.js
