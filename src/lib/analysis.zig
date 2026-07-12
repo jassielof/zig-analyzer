@@ -9,4 +9,9 @@ pub const queries = struct {
     pub const inlay_hints = @import("analysis/queries/inlay_hints.zig");
     pub const semantic_diagnostics = @import("analysis/queries/semantic_diagnostics.zig");
     pub const semantic_tokens = @import("analysis/queries/semantic_tokens.zig");
+    pub const type_mod = @import("analysis/queries/type.zig");
+    pub const scope = @import("analysis/queries/scope.zig");
+    pub const containers = @import("analysis/queries/containers.zig");
+    pub const generics = @import("analysis/queries/generics.zig");
+    pub const resolve_expr = @import("analysis/queries/resolve_expr.zig");
 };

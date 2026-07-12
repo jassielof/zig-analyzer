@@ -157,7 +157,7 @@ pub fn collect(
     gpa: std.mem.Allocator,
     ast: Ast,
     item_tree: ItemTree,
-    lookupSignature: *const fn (ctx: *anyopaque, base: ?[]const u8, name: []const u8) ?[]const u8,
+    lookupSignature: *const fn (ctx: *anyopaque, base: ?[]const u8, name: []const u8, call_offset: u32) ?[]const u8,
     lookup_ctx: *anyopaque,
     options: CollectOptions,
 ) ![]const Hint {
@@ -180,20 +180,6 @@ pub fn collect(
 
         // Skip if this identifier is a declaration name (`fn foo(`).
         if (callee_token > 0 and ast.tokenTag(callee_token - 1) == .keyword_fn) continue;
-
-        const fa = resolve.fieldAccessAtToken(ast, callee_token);
-        const signature = if (fa) |f|
-            lookupSignature(lookup_ctx, f.base, f.field)
-        else
-            lookupSignature(lookup_ctx, null, callee_name);
-        const sig = signature orelse continue;
-
-        const names = try paramNamesFromSignature(gpa, sig);
-        defer {
-            for (names) |n| gpa.free(n);
-            gpa.free(names);
-        }
-        if (names.len == 0) continue;
 
         const Arg = struct { start: Ast.TokenIndex, end: Ast.TokenIndex };
         var arg_starts: std.ArrayList(Arg) = .empty;
@@ -224,7 +210,28 @@ pub fn collect(
             }
         }
 
-        if (options.exclude_single_argument and arg_starts.items.len == 1) continue;
+        // Build-style: single `.{}` arg — prefer field-name hints over `options:`.
+        if (options.exclude_single_argument and arg_starts.items.len == 1) {
+            if (isStructLiteralStart(ast, arg_starts.items[0].start)) {
+                try appendStructLiteralFieldNameHints(gpa, ast, &out, arg_starts.items[0].start, arg_starts.items[0].end);
+            }
+            continue;
+        }
+
+        const call_offset = ast.tokenStart(callee_token);
+        const fa = resolve.fieldAccessAtToken(ast, callee_token);
+        const signature = if (fa) |f|
+            lookupSignature(lookup_ctx, f.base, f.field, call_offset)
+        else
+            lookupSignature(lookup_ctx, null, callee_name, call_offset);
+        const sig = signature orelse continue;
+
+        const names = try paramNamesFromSignature(gpa, sig);
+        defer {
+            for (names) |n| gpa.free(n);
+            gpa.free(names);
+        }
+        if (names.len == 0) continue;
 
         for (arg_starts.items, 0..) |arg, arg_i| {
             if (arg_i >= names.len) break;
@@ -233,6 +240,51 @@ pub fn collect(
     }
 
     return try out.toOwnedSlice(gpa);
+}
+
+fn isStructLiteralStart(ast: Ast, start: Ast.TokenIndex) bool {
+    // `.{}` or `T{}` — period then l_brace, or identifier then l_brace.
+    if (start + 1 >= ast.tokens.len) return false;
+    if (ast.tokenTag(start) == .period and ast.tokenTag(start + 1) == .l_brace) return true;
+    if (ast.tokenTag(start) == .identifier and ast.tokenTag(start + 1) == .l_brace) return true;
+    return false;
+}
+
+/// Field-name hints before each value in a `.{}` / `T{}` literal
+/// (`.name = <hint "name: ">value`). Skips when the value is already a bare
+/// identifier matching the field (`.name = name`).
+fn appendStructLiteralFieldNameHints(
+    gpa: std.mem.Allocator,
+    ast: Ast,
+    out: *std.ArrayList(Hint),
+    start: Ast.TokenIndex,
+    end: Ast.TokenIndex,
+) !void {
+    var t = start;
+    while (t <= end and t + 2 < ast.tokens.len) : (t += 1) {
+        // `. field_name = value`
+        if (ast.tokenTag(t) != .period) continue;
+        if (ast.tokenTag(t + 1) != .identifier) continue;
+        if (ast.tokenTag(t + 2) != .equal) continue;
+
+        const field_name = ast.tokenSlice(t + 1);
+        const value_token = t + 3;
+        if (value_token > end) break;
+
+        // Skip `.name = name`
+        if (ast.tokenTag(value_token) == .identifier and
+            std.mem.eql(u8, ast.tokenSlice(value_token), field_name))
+        {
+            continue;
+        }
+
+        const loc = ast.tokenLocation(0, value_token);
+        try out.append(gpa, .{
+            .line = @intCast(loc.line),
+            .character = @intCast(loc.column),
+            .label = try std.fmt.allocPrint(gpa, "{s}: ", .{field_name}),
+        });
+    }
 }
 
 fn maybeAppendHint(
@@ -324,4 +376,33 @@ test "collectTypeHints finds a local string const inside a function body" {
     defer freeHints(gpa, hints);
     try testing.expectEqual(@as(usize, 1), hints.len);
     try testing.expectEqualStrings(": *const [2:0]u8", hints[0].label);
+}
+
+fn testLookupSig(_: *anyopaque, _: ?[]const u8, _: []const u8, _: u32) ?[]const u8 {
+    return "fn addExecutable(b: *Build, options: anytype) void";
+}
+
+test "collect emits field-name hints for single struct-literal arg" {
+    const gpa = testing.allocator;
+    var ast = try Ast.parse(gpa,
+        \\fn build(b: *Build) void {
+        \\    b.addExecutable(.{
+        \\        .name = "app",
+        \\        .root_module = mod,
+        \\    });
+        \\}
+        \\
+    , .zig);
+    defer ast.deinit(gpa);
+
+    var tree = try item_tree_mod.build(gpa, ast);
+    defer tree.deinit(gpa);
+
+    var dummy: u8 = 0;
+    const hints = try collect(gpa, ast, tree, testLookupSig, &dummy, .{ .exclude_single_argument = true });
+    defer freeHints(gpa, hints);
+
+    try testing.expect(hints.len >= 2);
+    try testing.expectEqualStrings("name: ", hints[0].label);
+    try testing.expectEqualStrings("root_module: ", hints[1].label);
 }

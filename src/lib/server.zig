@@ -21,6 +21,8 @@ const formatting = @import("formatting.zig");
 const semantic_tokens = @import("analysis/queries/semantic_tokens.zig");
 const inlay_hints = @import("analysis/queries/inlay_hints.zig");
 const uri_util = @import("uri.zig");
+const scope_mod = @import("analysis/queries/scope.zig");
+const resolve_expr = @import("analysis/queries/resolve_expr.zig");
 
 /// Where the server is in the LSP lifecycle state machine (see the LSP spec's
 /// "Basic JSON Structures" / lifecycle section). Method handling depends on
@@ -1124,9 +1126,123 @@ pub const Server = struct {
                 if (try self.resolveFieldChain(uri, parsed_file.ast, chain)) |cross| {
                     return cross;
                 }
+                // Typed member access: `b.addExecutable` where `b: *std.Build`,
+                // or `list.append` where `list` is an ArrayList instance.
+                if (try self.resolveTypedMemberAccess(uri, parsed_file.ast, pos, chain)) |cross| {
+                    return cross;
+                }
             }
         }
         return null;
+    }
+
+    /// Request-local scratch for typed resolution (keeps disk ASTs alive).
+    const TypeScratch = struct {
+        server: *Server,
+        loaded: std.ArrayList(ParsedUri) = .empty,
+
+        fn deinit(self: *TypeScratch) void {
+            for (self.loaded.items) |p| p.deinit(self.server);
+            self.loaded.deinit(self.server.gpa);
+        }
+
+        fn loadFile(ctx: *resolve_expr.Context, target_uri: []const u8) ?Ast {
+            const scratch: *TypeScratch = @ptrCast(@alignCast(ctx.userdata.?));
+            const server = scratch.server;
+            if (server.documents.get(target_uri)) |doc| {
+                const parsed = parse.parse(&server.parse_cache, server.gpa, target_uri, doc.text, doc.revision) catch return null;
+                return parsed.ast;
+            }
+            const parsed = (server.parseUri(target_uri) catch return null) orelse return null;
+            if (parsed.owned_ast) {
+                scratch.loaded.append(server.gpa, parsed) catch {
+                    parsed.deinit(server);
+                    return null;
+                };
+                return parsed.ast;
+            }
+            return parsed.ast;
+        }
+    };
+
+    fn makeExprContext(
+        self: *Server,
+        scratch: *TypeScratch,
+        uri: []const u8,
+        ast: Ast,
+        scopes: scope_mod.ScopeTree,
+    ) resolve_expr.Context {
+        return .{
+            .gpa = self.gpa,
+            .uri = uri,
+            .ast = ast,
+            .scopes = scopes,
+            .zig_lib_dir = self.zig_lib_dir,
+            .packages = &self.packages,
+            .loadFile = TypeScratch.loadFile,
+            .userdata = scratch,
+        };
+    }
+
+    /// `base.field` where `base` has a resolved type (param annotation,
+    /// generic instance, …).
+    fn resolveTypedMemberAccess(
+        self: *Server,
+        uri: []const u8,
+        ast: Ast,
+        pos: resolve.Position,
+        chain: []const []const u8,
+    ) !?AnyDefinition {
+        if (chain.len < 2) return null;
+
+        var scopes = try scope_mod.build(self.gpa, ast);
+        defer scopes.deinit();
+
+        var scratch: TypeScratch = .{ .server = self };
+        defer scratch.deinit();
+
+        var ctx = self.makeExprContext(&scratch, uri, ast, scopes);
+        defer ctx.deinitScratch();
+
+        const offset = resolve.positionToOffset(ast.source, pos);
+
+        // Multi-hop: resolve types left-to-right, then member-lookup the tip.
+        // For `b.addExecutable`, chain is [b, addExecutable].
+        // For `list.append`, chain is [list, append].
+        if (chain.len == 2) {
+            const member = try resolve_expr.resolveMemberAccess(&ctx, chain[0], chain[1], offset) orelse return null;
+            const sig = try self.gpa.dupe(u8, member.signature);
+            return .{
+                .uri = try self.gpa.dupe(u8, member.uri),
+                .def = .{
+                    .line = member.line,
+                    .character = member.character,
+                    .end_character = member.end_character,
+                    .signature = sig,
+                },
+                .signature_owned = true,
+            };
+        }
+
+        // Longer chains: type-resolve through intermediate hops as type vals,
+        // then member-lookup the last field on the resulting type.
+        var ty = try resolve_expr.resolveIdentType(&ctx, chain[0], offset, false) orelse return null;
+        var i: usize = 1;
+        while (i + 1 < chain.len) : (i += 1) {
+            ty = try resolve_expr.lookupMemberType(&ctx, ty, chain[i], true) orelse return null;
+        }
+        const member = try resolve_expr.memberResult(&ctx, ty, chain[chain.len - 1]) orelse return null;
+        const sig = try self.gpa.dupe(u8, member.signature);
+        return .{
+            .uri = try self.gpa.dupe(u8, member.uri),
+            .def = .{
+                .line = member.line,
+                .character = member.character,
+                .end_character = member.end_character,
+                .signature = sig,
+            },
+            .signature_owned = true,
+        };
     }
 
     const CrossFileDefinition = AnyDefinition;
@@ -1743,32 +1859,52 @@ pub const Server = struct {
         owned_sig: ?[]const u8 = null,
     };
 
-    fn inlayLookupSignature(ctx_ptr: *anyopaque, base: ?[]const u8, name: []const u8) ?[]const u8 {
+    fn inlayLookupSignature(ctx_ptr: *anyopaque, base: ?[]const u8, name: []const u8, call_offset: u32) ?[]const u8 {
         const ctx: *InlayLookupCtx = @ptrCast(@alignCast(ctx_ptr));
         if (base) |b| {
             const chain = [_][]const u8{ b, name };
-            const cross = ctx.server.resolveFieldChain(ctx.importer_uri, ctx.importer_ast, &chain) catch return null;
-            const result = cross orelse return null;
-            // Stash the owned signature on the lookup ctx so it outlives
-            // this call — `collect` only needs the bytes until it finishes
-            // parsing param names for this callee.
-            if (ctx.owned_sig) |old| ctx.server.gpa.free(old);
-            if (result.signature_owned) {
-                ctx.owned_sig = result.def.signature;
-                ctx.server.gpa.free(result.uri);
-                return ctx.owned_sig;
+            if (ctx.server.resolveFieldChain(ctx.importer_uri, ctx.importer_ast, &chain) catch null) |result| {
+                return stashInlaySig(ctx, result);
             }
-            const duped = ctx.server.gpa.dupe(u8, result.def.signature) catch {
-                ctx.server.freeAnyDefinition(result);
-                return null;
-            };
-            ctx.server.gpa.free(result.uri);
-            ctx.owned_sig = duped;
-            return duped;
+            // Typed member: `b.addExecutable` where `b: *std.Build`.
+            const pos: resolve.Position = offsetToPosition(ctx.importer_ast.source, call_offset);
+            if (ctx.server.resolveTypedMemberAccess(ctx.importer_uri, ctx.importer_ast, pos, &chain) catch null) |result| {
+                return stashInlaySig(ctx, result);
+            }
+            return null;
         }
         const item = ctx.tree.find(name) orelse return null;
         if (item.kind != .function) return null;
         return item.signature;
+    }
+
+    fn stashInlaySig(ctx: *InlayLookupCtx, result: AnyDefinition) ?[]const u8 {
+        if (ctx.owned_sig) |old| ctx.server.gpa.free(old);
+        if (result.signature_owned) {
+            ctx.owned_sig = result.def.signature;
+            ctx.server.gpa.free(result.uri);
+            return ctx.owned_sig;
+        }
+        const duped = ctx.server.gpa.dupe(u8, result.def.signature) catch {
+            ctx.server.freeAnyDefinition(result);
+            return null;
+        };
+        ctx.server.gpa.free(result.uri);
+        ctx.owned_sig = duped;
+        return duped;
+    }
+
+    fn offsetToPosition(source: []const u8, offset: u32) resolve.Position {
+        var line: u32 = 0;
+        var line_start: u32 = 0;
+        var i: u32 = 0;
+        while (i < offset and i < source.len) : (i += 1) {
+            if (source[i] == '\n') {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        return .{ .line = line, .character = offset -| line_start };
     }
 
     fn handleInlayHint(self: *Server, writer: *Io.Writer, msg: jsonrpc.Message) !void {
