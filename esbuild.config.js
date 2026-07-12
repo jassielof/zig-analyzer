@@ -11,7 +11,6 @@ async function main() {
     bundle: true,
     format: "cjs",
     platform: "node",
-    target: "node",
     outfile: "dist/extension.js",
     external: ["vscode"],
     sourcemap: !production,
