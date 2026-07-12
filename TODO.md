@@ -2,15 +2,17 @@
 
 We'll use Docent as reference project for testing (located in `dependencies/docent`), it's a multi-module project (similar to Cargo/Go workspaces), has dependencies, one which also has another dependency, etc.
 
-## Language features
+## LSP
 
-### Hover
+### Language features
+
+#### Hover
 
 - [x] Unlike Rust Analyzer, the Zig compiler can work without a build system script (Cargo.toml), as well as with one. Both cases need to be supported by detection of the presence of a build.zig file in the workspace root, if it exists, the build script should be used to detect dependencies, modules, etc. Otherwise, the workspace should be treated accordingly.
 - [x] Inlay hints work weirdly on structure functions, for example, in `build.zig` this `const toml_mod = b.dependency("toml", .{}).module("toml");` where `b.dependency()` is from `std.Build`, defined as `pub fn dependency(b: *Build, name: []const u8, args: anytype) *Dependency {}`, and it basically accepts 2 arguments, not 3, currently the inlay hints wrongly shows it as `b.dependency(b: "toml", name: .{})`, when it should be `b.dependency(name: "toml", args: .{})`, since `b` is the receiver of the function. This fix should happen overall, not just for the build script, is a general issue with paramater inlay hints of structure functions.
 - [x] The `@This()` built-in should be resolved for its container type, this mean if we have `src/root.zig` with its doc container doc comments, `@This()` on hover should render the doc comments of `src/root.zig`, if there's a `src/root.zig@Foo` structure, that within it has `@This()` on hover should render the doc comments of `src/root.zig@Foo`.
     - [ ] The `@This()` currently displays the container doc comment, it shouldn't, it should display its own documentation, but since we don't have access to it unless we manually fetch it from the language reference, it's gonna be left empty at the moment, until then, what it should do instead, for example in `const Foo = @This()` if the Foo container has doc comments, the `const Foo` declaration should render the doc comments of `Foo`, which currently they aren't.
-    - [ ] 
+    - [ ]
 - [x] Inlay hints aren't inferred for values, for example `const toml_mod = b.dependency("toml", .{}).module("toml");`, where `const toml_mod` should be inferred to be `const toml_mod: *Module`, where `*Module` is the return type of `b.dependency("toml", .{}).module("toml")`, which is `*std.Build.Module`, basically `pub fn module(d: *Dependency, name: []const u8) *Module {}`.
   - [x] As well for constant strings, for example `const mod_name = "docent";` should be `const mod_name: *const [6:0]u8 = "docent";`, where `*const [6:0]u8` is the type of the string `"docent"`. And so on for all the other cases.
 - [x] Code lenses:

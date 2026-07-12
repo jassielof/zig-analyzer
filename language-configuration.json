@@ -3,9 +3,7 @@
     // Zig has no block comments (`/* */`), only line comments.
     "lineComment": "//"
   },
-  // Continues `///` doc comments and `//!` top-level doc comments onto
-  // the next line automatically, matching how most language configs
-  // that support doc comments behave.
+  // Continues `///` doc comments and `//!` top-level doc comments onto the next line automatically, matching how most language configs that support doc comments behave.
   "onEnterRules": [
     {
       "beforeText": "^\\s*///.*$",
@@ -16,8 +14,7 @@
       "action": { "indentAction": "None", "appendText": "//! " }
     }
   ],
-  // `@` is included so builtins (`@import`, `@TypeOf`, ...) are treated
-  // as one word for double-click selection and word-based navigation.
+  // `@` is included so builtins (`@import`, `@TypeOf`, ...) are treated as one word for double-click selection and word-based navigation.
   "wordPattern": "(-?\\d*\\.\\d\\w*)|([@$]?[A-Za-z_]\\w*)",
   "brackets": [
     ["{", "}"],

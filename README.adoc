@@ -1,0 +1,1 @@
+= Zig Analyzer: A Language Server Protocol (LSP) implementation for Zig
