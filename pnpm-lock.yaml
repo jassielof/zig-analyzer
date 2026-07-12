@@ -236,6 +236,37 @@ importers:
         specifier: ^8.63.0
         version: 8.63.0(eslint@10.7.0)(typescript@7.0.2)
 
+  C:/Users/Jassiel/Dev/github/jassielof/zig-analyzer:
+    dependencies:
+      vscode-languageclient:
+        specifier: ^10.1.0
+        version: 10.1.0
+    devDependencies:
+      '@eslint/js':
+        specifier: ^10.0.1
+        version: 10.0.1(eslint@10.7.0)
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+      '@types/vscode':
+        specifier: ^1.125.0
+        version: 1.125.0
+      '@vscode/vsce':
+        specifier: ^3.9.2
+        version: 3.9.2
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
+      eslint:
+        specifier: ^10.7.0
+        version: 10.7.0
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      typescript-eslint:
+        specifier: ^8.63.0
+        version: 8.63.0(eslint@10.7.0)(typescript@7.0.2)
+
 packages:
 
   '@azu/format-text@1.0.2':
