@@ -6,26 +6,26 @@ const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
 
 async function main() {
-  const ctx = await esbuild.context({
-    entryPoints: ["src/vscode/extension.ts"],
-    bundle: true,
-    format: "cjs",
-    platform: "node",
-    outfile: "dist/extension.js",
-    external: ["vscode"],
-    sourcemap: !production,
-    minify: production,
-  });
+    const ctx = await esbuild.context({
+        entryPoints: ["internal/zig_analyzer_vscode/extension.ts"],
+        bundle: true,
+        format: "cjs",
+        platform: "node",
+        outfile: "dist/extension.js",
+        external: ["vscode"],
+        sourcemap: !production,
+        minify: production,
+    });
 
-  if (watch) {
-    await ctx.watch();
-  } else {
-    await ctx.rebuild();
-    await ctx.dispose();
-  }
+    if (watch) {
+        await ctx.watch();
+    } else {
+        await ctx.rebuild();
+        await ctx.dispose();
+    }
 }
 
 main().catch((err) => {
-  console.error(err);
-  process.exit(1);
+    console.error(err);
+    process.exit(1);
 });

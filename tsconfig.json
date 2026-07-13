@@ -4,7 +4,7 @@
     "target": "esnext",
     "lib": ["ESNext"],
     "outDir": "dist",
-    "rootDir": "src/vscode",
+    "rootDir": "internal/zig_analyzer_vscode",
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -14,5 +14,5 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["src/vscode/**/*.ts"]
+  "include": ["internal/zig_analyzer_vscode/**/*.ts"]
 }

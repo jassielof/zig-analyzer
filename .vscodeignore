@@ -9,7 +9,9 @@
 
 vsc-extension-quickstart.md
 
-src/**
+lib/**
+internal/**
+cmd/**
 tests/**
 references/**
 .zig-cache/**

@@ -14,7 +14,7 @@
   "main": "./dist/extension.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src/vscode",
+    "lint": "eslint internal/zig_analyzer_vscode",
     "build": "node esbuild.config.js",
     "watch": "node esbuild.config.js --watch",
     "package": "node esbuild.config.js --production && vsce package --no-dependencies"
@@ -22,8 +22,7 @@
   "qna": "https://github.com/jassielof/zig-analyzer/discussions",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jassielof/zig-analyzer",
-    "directory": "vscode"
+    "url": "https://github.com/jassielof/zig-analyzer"
   },
   "engines": {
     "vscode": "^1.125.0"
