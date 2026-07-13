@@ -13,12 +13,6 @@
 [submodule "references/diffz"]
 	path = references/diffz
 	url = https://github.com/ziglibs/diffz
-[submodule "references/zigscient-next"]
-	path = references/zigscient-next
-	url = https://github.com/llogick/zigscient-next
-[submodule "references/zigscient"]
-	path = references/zigscient
-	url = https://github.com/llogick/zigscient
 [submodule "dependencies/docent"]
 	path = dependencies/docent
 	url = https://github.com/jassielof/docent
