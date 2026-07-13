@@ -70,3 +70,8 @@ Not a focus at the moment, shouldn't be resolved as it needs more research, desi
 
 - [ ] Test gutter icons for test cases.
 - [ ] Documentation for built-in functions isn't really in the stdlib, it needs to be fetched from the language reference and bundled. That's why ZLS bundles the langref.html.in, which is the template for the generated langref HTML, we could also bundle it, but it's annoying, and inefficient, Zig should bundle it accordingly, but it does not.
+  - [ ] Ideally and thankfully, the Zig online language reference is indexed, for example for `@This()`, the URL is <https://ziglang.org/documentation/0.16.0/#This>, and for `@import()` it's <https://ziglang.org/documentation/0.16.0/#import>, and so on, but it's still HTML, so doc comments will have to be just links to the respective pages, such as ``See language reference for [`<@BUILTIN FUNCTION()>`](https://ziglang.org/documentation/<ZIG VERSION MATCHING THE LSP COMPILER VERSION>/#<BUILTIN FUNCTION>)``. This should render for every built-in function. Alternatively, we could use MarkitDown for fetching and converting the HTML to Makrdown, easing to just parse the respective structured markdown into a serialized JSON and deserialized for each built-in, but adds a pre-build step dependency.
+
+## VS Code
+
+- [ ] Add an option to provide lints based on the Zig Language Reference Style Guide, for example, naming conventions, formatting, etc.

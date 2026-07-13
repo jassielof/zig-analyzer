@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const project = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
@@ -11,6 +12,7 @@ pub fn build(b: *std.Build) void {
     const mod = b.addModule(mod_name, .{
         .root_source_file = b.path("src/lib/root.zig"),
         .target = target,
+        .optimize = optimize,
     });
 
     // Single source of truth for the version string: build.zig.zon.

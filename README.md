@@ -1,4 +1,4 @@
-# Zig Analyzer
+# Zig Analyzer for VS Code
 
 VS Code client for [zig-analyzer](https://github.com/jassielof/zig-analyzer), a Zig language server built independently of the Zig compiler's internal APIs.
 
@@ -8,10 +8,10 @@ This extension is a thin LSP client — it does not bundle or download the `zig-
 
 ## Extension Settings
 
-* `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable. Required — the extension does not start a language server until this is set.
-* `zigAnalyzer.zigPath`: Path to the `zig` executable, used by **Zig Analyzer: Run Build Step** (default `zig`, i.e. whatever's on `PATH`).
-* `zigAnalyzer.trace.server`: Traces communication between VS Code and the language server (`off`, `messages`, `verbose`). Useful for debugging.
-* `zigAnalyzer.formatter.command` / `zigAnalyzer.formatter.args`: Override the formatter used by "Format Document" (see [Formatting](#formatting) below).
+- `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable. Required — the extension does not start a language server until this is set.
+- `zigAnalyzer.zigPath`: Path to the `zig` executable, used by **Zig Analyzer: Run Build Step** (default `zig`, i.e. whatever's on `PATH`).
+- `zigAnalyzer.trace.server`: Traces communication between VS Code and the language server (`off`, `messages`, `verbose`). Useful for debugging.
+- `zigAnalyzer.formatter.command` / `zigAnalyzer.formatter.args`: Override the formatter used by "Format Document" (see [Formatting](#formatting) below).
 
 ### Formatting
 
@@ -19,8 +19,8 @@ By default, "Format Document" runs the standard, zero-config `zig fmt --stdin`. 
 
 ```json
 {
-  "zigAnalyzer.formatter.command": "/path/to/your/formatter",
-  "zigAnalyzer.formatter.args": ["--some-flag"]
+    "zigAnalyzer.formatter.command": "/path/to/your/formatter",
+    "zigAnalyzer.formatter.args": ["--some-flag"]
 }
 ```
 
@@ -39,15 +39,15 @@ Whatever you configure is spawned directly (never through a shell), so shell met
 
 ## Commands
 
-* **Zig Analyzer: Restart Language Server** — stops and restarts the language server, picking up a changed `zigAnalyzer.serverPath` without reloading the window.
-* **Zig Analyzer: Run Build Step** — lists the `build.zig` steps for the current project (via `zig build --list-steps`) and runs the one you pick as a VS Code task.
+- **Zig Analyzer: Restart Language Server** — stops and restarts the language server, picking up a changed `zigAnalyzer.serverPath` without reloading the window.
+- **Zig Analyzer: Run Build Step** — lists the `build.zig` steps for the current project (via `zig build --list-steps`) and runs the one you pick as a VS Code task.
 
 ## Code lenses
 
 When editing Zig files (with editor code lenses enabled):
 
-* In `build.zig`: a **zig build** lens above `fn build`, and a **zig build \<step\>** lens above each `b.step("…")`.
-* Above `fn main`: if `build.zig` wires that file as an executable root to a run step (the usual `b.step` → `addExecutable` → `addRunArtifact` → `dependOn` pattern), the lens runs **zig build \<step\>**. Otherwise it falls back to **zig run** on that file.
+- In `build.zig`: a **zig build** lens above `fn build`, and a **zig build \<step\>** lens above each `b.step("…")`.
+- Above `fn main`: if `build.zig` wires that file as an executable root to a run step (the usual `b.step` → `addExecutable` → `addRunArtifact` → `dependOn` pattern), the lens runs **zig build \<step\>**. Otherwise it falls back to **zig run** on that file.
 
 ## Known Issues
 
