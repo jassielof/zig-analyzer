@@ -4,10 +4,7 @@ const std = @import("std");
 const types = @import("lsp").types;
 const offsets = @import("offsets.zig");
 const tracy = @import("tracy");
-// TODO: dmp's diff module is currently a stub (dependencies/dmp/lib/dmp/diff.zig) and does
-// not yet implement the DiffMatchPatch API that diffz provided. This will not compile until
-// dmp gains an equivalent `DiffMatchPatch`/`initDefault`/`diff`/`deinitDiffList` API.
-const DiffMatchPatch = @import("dmp").diff;
+const Diff = @import("dmp").Diff;
 
 pub fn edits(
     io: std.Io,
@@ -19,14 +16,14 @@ pub fn edits(
     const tracy_zone = tracy.trace(@src());
     defer tracy_zone.end();
 
-    const dmp: DiffMatchPatch = .initDefault(io, allocator);
+    const dmp: Diff = .init(io, allocator);
     var diffs = try dmp.diff(
         before,
         after,
         true,
         .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(250) } },
     );
-    defer DiffMatchPatch.deinitDiffList(allocator, &diffs);
+    defer Diff.deinitEditList(allocator, &diffs);
 
     var edit_count: usize = 0;
     for (diffs.items) |diff| {
