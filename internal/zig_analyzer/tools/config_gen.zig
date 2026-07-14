@@ -4,7 +4,7 @@
 //! - generate `schema.json`
 //! - generate metadata about Zig's builtins (uses `src/tools/langref.html.in`)
 //! - generate ZLS configuration options for vscode-zig's package.json
-// TODO: This should be moved to /tools/config_gen.zig and adjusted accordingly.
+// TODO: This should be moved to /tools/config_gen/main.zig and adjusted accordingly.
 const std = @import("std");
 
 const ConfigOption = struct {

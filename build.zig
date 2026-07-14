@@ -8,17 +8,22 @@ const zig_analyzer_build = @import("build/zig_analyzer.zig");
 
 const package_version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch unreachable;
 
-// TODO: Remove this, the minimum runtime version will always match the Zig version used to build the LSP.
+// TODO: Remove this, the minimum runtime version will always match the Zig version used to build the LSP. Unless there's really a reason why including the min runtime version is useful.
 const minimum_runtime_zig_version = "0.16.0";
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // TODO: No option for single-threaded unless justified, just accept whatever default Zig uses.
     const single_threaded = b.option(bool, "single-threaded", "Build a single threaded Executable");
+    // TODO: No idea what PIE might be for. Investigate.
     const pie = b.option(bool, "pie", "Build a Position Independent Executable");
+    // TODO: No need to strip the executable, accept default, which is no stripping, for safety and debugging purposes.
     const strip = b.option(bool, "strip", "Strip executable");
+    // TODO: No idea what tests might be filtered for, investigate.
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match filter") orelse &.{};
+    // TODO: Also remove this, unless there's a reason to not use LLVM, since LLVM is just more robust, mature and polished than Zig's.
     var use_llvm = b.option(bool, "use-llvm", "Use Zig's llvm code backend");
 
     const resolved_version = version_build.getVersion(b, package_version);
