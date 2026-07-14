@@ -1,9 +1,3 @@
-[submodule "references/zls"]
-	path = references/zls
-	url = https://github.com/zigtools/zls/
-[submodule "references/lsp-kit"]
-	path = references/lsp-kit
-	url = https://github.com/zigtools/lsp-kit
 [submodule "references/vscode-zig"]
 	path = references/vscode-zig
 	url = https://codeberg.org/ziglang/vscode-zig
