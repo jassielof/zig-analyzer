@@ -1,51 +1,22 @@
 # Zig Analyzer
 
-We'll use Docent as reference project for testing (located in `dependencies/docent`), it's a multi-module project (similar to Cargo/Go workspaces), has dependencies, one which also has another dependency, etc.
+- [ ] Configurable formatter, currently it's hardcoded to always use `zig fmt --stdin`, always, regardless if the editor has a custom formatter configured, and it doesn't respect editor settings, if I want to bring my own `docent fmt --stdin` formatter I simply can't because both the VS Code extension and the LSP hardcode it to the Zig's standard one, plus it can't be disabled. When fixing this, it should respect the editor setting, and explicit ask for a standard input formatter, not via file path.
+- [ ] Reference counter, ZLS already can find references, so it should be easy to show reference counts as code lenses, this should be bounded to the build-graph compilation unit.
+- [ ] Dimmed unused declarations diagnostics, this should consider public vs. non-public (private) declarations.
+- [ ] Doctests as documentation examples for declaration hover, these should be shown as:
+    ````
+    ---
+    ## Doctest example
 
-Granular implementation TODOs live as `// TODO:`/`// FIXME:` comments in the
-files they apply to, not here — this file is just the open, tier-level
-roadmap. Completed work isn't tracked here either; `git log` is the record
-of what shipped and why.
+    <doc comment from the doctest if available>
 
-## Already ahead of zls, worth protecting during any refactor
-
-- Reference-count codeLens (`features/code_lens.zig`) — zls doesn't have this.
-- Dimmed unused-declaration diagnostics via `DiagnosticTag.Unnecessary`.
-- Doctest-as-hover-example (`test <ident> { ... }` shown as a hover example).
-- `build.zig`-driven `main()`/step run tracking (best-effort, not hardcoded
-  `zig build run` like zls).
-- Configurable formatter and `zigPath`, not hardcoded to a bundled/downloaded
-  Zig binary — the user controls both.
-
-## Open work
-
-### `@This()` hover
-
-The `@This()` built-in currently falls back to showing the *enclosing
-container's* doc comment. That's a stand-in, not the real answer: `@This()`
-should show its own documentation, but that isn't in the stdlib — it'd need
-fetching from the language reference (see below). Until that's wired up,
-`const Foo = @This()` should at least render `Foo`'s own `///` doc comment
-when the container has one, which it currently doesn't.
-
-### Docent-based lints in the VS Code extension
-
-Add an option to surface Docent's checks (naming conventions, formatting,
-Zig Language Reference Style Guide adherence) as editor diagnostics —
-either by shelling out to Docent or linking it as a library. Distinct from
-Docent's other role here as a test fixture (a real multi-module workspace
-for validating cross-file/package resolution).
-
-## Deferred — needs more research/design before starting
-
-- **Test gutter icons** for test cases.
-- **Built-in function documentation.** Not in the stdlib — `@This()`,
-  `@import()`, etc. have no doc comments to show on hover, because ZLS
-  bundles `langref.html.in` (the template Zig itself uses to generate the
-  language reference) precisely because there's no other source. Options,
-  none fully satisfying: bundle the same template (extra maintenance,
-  version-drift risk); link out to
-  `https://ziglang.org/documentation/<version>/#<BuiltinName>` per builtin
-  (simple, but doc comments become bare links, no inline content); or
-  fetch+convert the online reference to Markdown at a pre-build step
-  (adds a build-time dependency on network access).
+    ```zig
+    <doctest content>
+    ```
+    ````
+    Doc comments can technically be not in the same file, for public declarations, for example src/lib.zig@foo() is public and then someone would define the doctest in src/lib_test.zig@foo, but that's really an anti-pattern; doctests need to live along their definition within the same file.
+- [ ] `main()` functions are hardcoded to be always run as `zig build run`, but that's not always the case, i could have many commands/main functions and each run with their own step name. It can fallback as best effort to `zig run <file>` for those that have no dependencies, but it should do a best-effort to analyze the build graph and fine the correct executables.
+- [ ] ZLS will always try to download respective binary for the target found in the manifest (`build.zig.zon`) under `minimum_zig_version`, and this can't be disabled, we should allow the user to configure whether they want this to happen automatically or not.
+- [ ] Lint or code quality checks are hardcoded and not configurable, this should be disabled and reworked fully. It should be disabled by default and toggable, but not configurable granularly, just whether they want lints or not, the lints should strictly follow the Zig Language Reference Style Guide. This includes: spaces for indentation, indentation of 4 spaces, naming conventions (my docent dependency handles this already, so zig analyzer needs to reuse naming convention checks, etc.), trailing comman for lists with 3 or more elements (lists, function parameters, etc.), line length of 100 characters.
+- [ ] Built-in functions documentation should be delegated to the online Zig documentation, currently we depend on the langref.html.in which is huge, we need to fetch it on every update, etc. To make things easier, we should just use a simple template to link to it, for example, for `@This()` the hover/doc for it would be `See [`@This()`](https://ziglang.org/documentation/0.16.0/#This) in the _Language Reference_.`, for `@import()` it would be `See [`@import()`](https://ziglang.org/documentation/0.16.0/#import) in the _Language Reference_.`, and so for all built-in functions.
+- [ ] **Test gutter icons** for test cases. By single projects, each project can be easily filtered and run individually with `zig test --filterflag "test ID"`, but if that test module depends on another module, this zig test breaks, so it's not possible to run that test individually for projects with dependencies. This needs to be marked as FIXME, for a robust workaround once it's possible, specially because for test modules, it's not possible to run a single test case, unless we add an option filter within the build filter, we could suggest the user (throw a warn, etc.)
