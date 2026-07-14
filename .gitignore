@@ -1,6 +1,7 @@
 # Zig
 .zig-cache
 zig-out
+zig-pkg
 
 # Node
 node_modules
