@@ -6,10 +6,48 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const jsonrpc_mod = b.addModule("jsonrpc", .{
+        .root_source_file = b.path("lib/jsonrpc/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Mirrors zigtools/lsp-kit's own module graph (parser <- types <- lsp):
+    // `lib/lsp/types.zig` is generated code that imports "parser" by name,
+    // and `lib/lsp/offsets.zig` imports "types" by name — both need those
+    // as named module imports, not just sibling files, for `@import("parser")`
+    // / `@import("types")` inside them to resolve.
+    const lsp_parser_mod = b.addModule("lsp_parser", .{
+        .root_source_file = b.path("lib/lsp/parser.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lsp_types_mod = b.addModule("lsp_types", .{
+        .root_source_file = b.path("lib/lsp/types.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "parser", .module = lsp_parser_mod },
+        },
+    });
+    const lsp_mod = b.addModule("lsp", .{
+        .root_source_file = b.path("lib/lsp/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "parser", .module = lsp_parser_mod },
+            .{ .name = "types", .module = lsp_types_mod },
+        },
+    });
+
     const mod = b.addModule("zig_analyzer", .{
         .root_source_file = b.path("internal/zig_analyzer/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "jsonrpc", .module = jsonrpc_mod },
+            .{ .name = "lsp", .module = lsp_mod },
+        },
     });
 
     // Single source of truth for the version string: build.zig.zon.

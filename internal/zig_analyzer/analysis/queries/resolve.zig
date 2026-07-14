@@ -18,6 +18,7 @@ const std = @import("std");
 const Ast = std.zig.Ast;
 const item_tree_mod = @import("item_tree.zig");
 const ItemTree = item_tree_mod.ItemTree;
+const lsp = @import("lsp");
 
 pub const Position = struct { line: u32, character: u32 };
 
@@ -36,17 +37,24 @@ pub const Definition = struct {
     signature: []const u8,
 };
 
-/// Byte-offset-based, like `std.zig.Ast.tokenLocation` itself — exact for
-/// ASCII source, an approximation of LSP's UTF-16 `character` semantics
-/// otherwise. Good enough for identifiers, which are ASCII in practice.
+/// Converts an LSP `Position` (whose `character` counts UTF-16 code units,
+/// per spec — this server doesn't advertise a `positionEncoding`
+/// capability, so the client-negotiable alternatives never apply and
+/// UTF-16 is always the mandated default) to a byte offset into `source`.
+/// Delegates to `lib/lsp`'s vendored `offsets.positionToIndex`, which
+/// counts code units correctly for multi-byte UTF-8 content (e.g. a
+/// doc comment containing non-ASCII text) — a naive "character count ==
+/// byte count" reading would resolve to the wrong byte for any position
+/// after such content on the same line.
+///
+/// Note this only corrects the *incoming* direction. Response ranges
+/// built from `Ast.tokenLocation` (used throughout the `features/*.zig`
+/// handlers) still report byte-based columns, not UTF-16 code units —
+/// the same gap on the way back out. Documented, not silently
+/// papered over: fixing that side means wrapping or replacing every
+/// `tokenLocation` call site, a larger follow-up left for later.
 pub fn positionToOffset(source: []const u8, pos: Position) u32 {
-    var line: u32 = 0;
-    var i: usize = 0;
-    while (line < pos.line) : (line += 1) {
-        const nl = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse return @intCast(source.len);
-        i = nl + 1;
-    }
-    return @intCast(@min(source.len, i + pos.character));
+    return @intCast(lsp.offsets.positionToIndex(source, .{ .line = pos.line, .character = pos.character }, .@"utf-16"));
 }
 
 /// Linear scan over every token; fine at the file sizes this targets for
@@ -575,6 +583,18 @@ fn resolveInSource(gpa: std.mem.Allocator, source: [:0]const u8, pos: Position) 
     defer tree.deinit(gpa);
 
     return resolveAt(ast, tree, pos);
+}
+
+test "positionToOffset counts UTF-16 code units, not bytes, for non-ASCII content" {
+    // "π" (U+03C0) is 2 bytes in UTF-8 but only 1 UTF-16 code unit — the
+    // exact case a naive "character count == byte count" approximation
+    // gets wrong. Source: "const π = 1; const y = π;\n" — the second "π"
+    // sits at UTF-16 character 23, but byte offset 24 (one byte later,
+    // since the first "π" cost 2 bytes but only 1 character).
+    const source = "const π = 1; const y = π;\n";
+    const offset = positionToOffset(source, .{ .line = 0, .character = 23 });
+    try testing.expectEqual(@as(u32, 24), offset);
+    try testing.expect(std.mem.startsWith(u8, source[offset..], "π"));
 }
 
 test "resolves a function parameter used in the body" {

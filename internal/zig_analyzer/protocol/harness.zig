@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const Io = std.Io;
-const framing = @import("framing.zig");
+const framing = @import("jsonrpc").framing;
 const Server = @import("../server.zig").Server;
 
 pub const Responses = struct {
