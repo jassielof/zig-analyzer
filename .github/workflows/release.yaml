@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  zig-analyzer-lsp:
+    name: Release Zig Analyzer LSP
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+          fetch-depth: 0
+      - name: Set up Zig
+        uses: jassielof/setup-zig@main
+      - name: Go Releaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

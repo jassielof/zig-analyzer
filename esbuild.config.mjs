@@ -1,12 +1,11 @@
-// Bundles the extension to a single CommonJS file so `vsce package --no-dependencies` doesn't need to understand pnpm's node_modules layout — see project plan §5.
-
-const esbuild = require("esbuild");
+import { context } from "esbuild";
+import { readFileSync } from "node:fs";
 
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
 
 async function main() {
-    const ctx = await esbuild.context({
+    const ctx = await context({
         entryPoints: ["internal/zig_analyzer_vscode/extension.ts"],
         bundle: true,
         format: "cjs",

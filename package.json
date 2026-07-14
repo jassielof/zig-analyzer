@@ -14,10 +14,9 @@
   "main": "./dist/extension.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "lint": "eslint internal/zig_analyzer_vscode",
-    "build": "node esbuild.config.js",
-    "watch": "node esbuild.config.js --watch",
-    "package": "node esbuild.config.js --production && vsce package --no-dependencies"
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "package": "node esbuild.config.mjs --production && vsce package --no-dependencies"
   },
   "qna": "https://github.com/jassielof/zig-analyzer/discussions",
   "repository": {
@@ -202,13 +201,10 @@
     "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
     "@types/node": "^26.1.1",
     "@types/vscode": "^1.125.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.1",
-    "eslint": "^10.7.0",
-    "typescript": "^7.0.2",
-    "typescript-eslint": "^8.63.0"
+    "typescript": "^7.0.2"
   }
 }

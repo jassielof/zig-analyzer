@@ -1,42 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const version_build = @import("build/version.zig");
-const tracy_build = @import("build/tracy.zig");
 const lsp_build = @import("build/lsp.zig");
+const tracy_build = @import("build/tracy.zig");
+const version_build = @import("build/version.zig");
 const zig_analyzer_build = @import("build/zig_analyzer.zig");
-const release_build = @import("build/release.zig");
 
 const package_version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch unreachable;
-const minimum_build_zig_version = @import("build.zig.zon").minimum_zig_version;
 
-/// Specify the minimum Zig version that is usable with zig-analyzer.
+// TODO: Remove this, the minimum runtime version will always match the Zig version used to build the LSP.
 const minimum_runtime_zig_version = "0.16.0";
 
-const release_targets = [_]std.Target.Query{
-    .{ .cpu_arch = .aarch64, .os_tag = .linux },
-    .{ .cpu_arch = .aarch64, .os_tag = .macos },
-    .{ .cpu_arch = .aarch64, .os_tag = .windows },
-    .{ .cpu_arch = .arm, .os_tag = .linux },
-    .{ .cpu_arch = .loongarch64, .os_tag = .linux },
-    .{ .cpu_arch = .riscv64, .os_tag = .linux },
-    .{ .cpu_arch = .x86, .os_tag = .linux },
-    .{ .cpu_arch = .x86, .os_tag = .windows },
-    .{ .cpu_arch = .x86_64, .os_tag = .linux },
-    .{ .cpu_arch = .x86_64, .os_tag = .macos },
-    .{ .cpu_arch = .x86_64, .os_tag = .windows },
-};
-
 pub fn build(b: *std.Build) !void {
-    comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 16) {
-        @compileError(std.fmt.comptimePrint(
-            \\Your Zig version does not meet the build requirement:
-            \\  required Zig version: 0.16.x
-            \\  actual   Zig version: {[current_version]s}
-            \\
-        , .{ .current_version = builtin.zig_version_string }));
-    };
-
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -117,58 +92,6 @@ pub fn build(b: *std.Build) !void {
 
     const lsp_types_output_file = lsp_build.runCodegen(b);
 
-    { // zig build release
-        var release_artifacts: [release_targets.len]*std.Build.Step.Compile = undefined;
-        for (release_targets, &release_artifacts) |target_query, *artifact| {
-            const release_target = b.resolveTargetQuery(target_query);
-
-            const lsp_modules = lsp_build.createLspModules(b, lsp_types_output_file, .{
-                .target = release_target,
-                .optimize = optimize,
-            });
-
-            const zig_analyzer_module = zig_analyzer_build.createZigAnalyzerModule(b, .{
-                .target = release_target,
-                .optimize = optimize,
-                .lsp_module = lsp_modules.lsp,
-                .tracy_enable = tracy_enable,
-                .tracy_options = tracy_options,
-                .build_options = build_options,
-                .version_data = version_data_module,
-            });
-
-            const known_folders_module = b.dependency("known_folders", .{
-                .target = release_target,
-                .optimize = optimize,
-            }).module("known-folders");
-
-            const exe_module = b.createModule(.{
-                .root_source_file = b.path("cmd/zig-analyzer/main.zig"),
-                .target = release_target,
-                .optimize = optimize,
-                .single_threaded = single_threaded,
-                .pic = pie,
-                .strip = strip,
-                .imports = &.{
-                    .{ .name = "exe_options", .module = exe_options },
-                    .{ .name = "known-folders", .module = known_folders_module },
-                    .{ .name = "tracy", .module = zig_analyzer_module.import_table.get("tracy").? },
-                    .{ .name = "zig_analyzer", .module = zig_analyzer_module },
-                },
-            });
-
-            artifact.* = b.addExecutable(.{
-                .name = "zig-analyzer",
-                .root_module = exe_module,
-                .max_rss = 2_000_000_000,
-                .use_llvm = use_llvm,
-                .use_lld = use_llvm,
-            });
-        }
-
-        release_build.release(b, &release_artifacts, resolved_version, minimum_build_zig_version, minimum_runtime_zig_version);
-    }
-
     const lsp_modules = lsp_build.createLspModules(b, lsp_types_output_file, .{
         .target = target,
         .optimize = optimize,
@@ -228,7 +151,7 @@ pub fn build(b: *std.Build) !void {
     }
 
     { // zig build test
-        const test_step = b.step("test", "Run all the tests");
+        const test_step = b.step("test", "Run the test suite");
 
         const src_tests = b.addTest(.{
             .name = "zig_analyzer src test",

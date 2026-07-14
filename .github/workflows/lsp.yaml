@@ -4,20 +4,12 @@ on:
   push:
     branches: [main]
     paths:
-      - "src/cli/**"
-      - "src/lib/**"
-      - "modules/**"
-      - "tests/**"
-      - "build.zig"
+      - "**/*.zig"
       - "build.zig.zon"
       - ".github/workflows/lsp.yaml"
   pull_request:
     paths:
-      - "src/cli/**"
-      - "src/lib/**"
-      - "modules/**"
-      - "tests/**"
-      - "build.zig"
+      - "**/*.zig"
       - "build.zig.zon"
       - ".github/workflows/lsp.yaml"
 
@@ -26,6 +18,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Setup Zig
+        uses: jassielof/setup-zig@main
+      - name: Build
+        run: zig build
   test:
     name: Test on ${{ matrix.os }}
     strategy:
@@ -40,8 +44,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          submodules: false
+          submodules: true
       - name: Setup Zig
         uses: jassielof/setup-zig@main
-      - name: Run tests
+      - name: Test suite
         run: zig build test --summary all

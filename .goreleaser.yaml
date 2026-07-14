@@ -1,0 +1,19 @@
+version: 2
+
+builds:
+  - builder: zig
+    targets:
+      - x86_64-windows
+
+archives:
+  - id: zig-analyzer
+    files:
+      - README.adoc
+      - LICENSE.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
