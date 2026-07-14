@@ -16,3 +16,9 @@
 [submodule "dependencies/dmp"]
 	path = dependencies/dmp
 	url = https://github.com/jassielof/dmp-zig
+[submodule "references/zigjr"]
+	path = references/zigjr
+	url = https://github.com/williamw520/zigjr
+[submodule "references/simdjzon-rpc"]
+	path = references/simdjzon-rpc
+	url = https://github.com/archaistvolts/simdjzon-rpc
