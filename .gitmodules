@@ -10,9 +10,6 @@
 [submodule "references/known-folders"]
 	path = references/known-folders
 	url = https://github.com/ziglibs/known-folders
-[submodule "references/diffz"]
-	path = references/diffz
-	url = https://github.com/ziglibs/diffz
 [submodule "dependencies/docent"]
 	path = dependencies/docent
 	url = https://github.com/jassielof/docent
