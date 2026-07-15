@@ -24,6 +24,7 @@ pub const Declaration = DocumentScope.Declaration;
 pub const Scope = DocumentScope.Scope;
 
 const version_data = @import("version_data");
+const build_options = @import("build_options");
 
 const Analyser = @This();
 
@@ -412,6 +413,16 @@ pub fn renderBuiltinFunctionSignature(
     try signature.appendSlice(arena, ") ");
     try signature.appendSlice(arena, builtin_data.return_type);
     return signature.items;
+}
+
+/// Builtin functions are documented on the online Zig Language Reference instead of embedding
+/// (and having to keep up to date) the prose documentation from `langref.html.in`.
+pub fn renderBuiltinFunctionDocumentationLink(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]u8 {
+    return std.fmt.allocPrint(arena, "See [`{s}()`](https://ziglang.org/documentation/{s}/#{s}) in the _Language Reference_.", .{
+        name,
+        build_options.zig_docs_version,
+        std.mem.trimStart(u8, name, "@"),
+    });
 }
 
 pub fn isInstanceCall(

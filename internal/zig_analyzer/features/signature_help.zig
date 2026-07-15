@@ -200,10 +200,7 @@ pub fn getSignatureInfo(
                     for (param_infos, builtin.parameters) |*info, parameter| {
                         info.* = .{
                             .label = .{ .string = parameter.signature },
-                            .documentation = if (parameter.documentation) |doc|
-                                .{ .markup_content = .{ .kind = markup_kind, .value = doc } }
-                            else
-                                null,
+                            .documentation = null,
                         };
                     }
                     return types.SignatureHelp.Signature{
@@ -215,7 +212,7 @@ pub fn getSignatureInfo(
                         ),
                         .documentation = .{ .markup_content = .{
                             .kind = markup_kind,
-                            .value = builtin.documentation,
+                            .value = try Analyser.renderBuiltinFunctionDocumentationLink(arena, builtin_name),
                         } },
                         .parameters = param_infos,
                         .activeParameter = paren_commas,

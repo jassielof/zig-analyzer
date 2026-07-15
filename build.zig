@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) !void {
         build_options.addOption(std.SemanticVersion, "version", resolved_version);
         build_options.addOption([]const u8, "version_string", b.fmt("{f}", .{resolved_version}));
         build_options.addOption([]const u8, "minimum_runtime_zig_version_string", builtin.zig_version_string);
+        build_options.addOption([]const u8, "zig_docs_version", @import("build.zig.zon").minimum_zig_version);
 
         break :blk build_options.createModule();
     };
@@ -46,8 +47,6 @@ pub fn build(b: *std.Build) !void {
 
     const version_data_module = blk: {
         const gen_version_data_cmd = b.addRunArtifact(gen_exe);
-        const version = if (package_version.pre == null) b.fmt("{f}", .{package_version}) else "master";
-        gen_version_data_cmd.addArgs(&.{ "--langref-version", version });
 
         gen_version_data_cmd.addArg("--langref-path");
         gen_version_data_cmd.addFileArg(b.path("internal/zig_analyzer/tools/langref.html.in"));

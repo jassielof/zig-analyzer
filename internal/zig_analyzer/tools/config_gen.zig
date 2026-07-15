@@ -443,12 +443,14 @@ const Tokenizer = struct {
 const Builtin = struct {
     name: []const u8,
     signature: []const u8,
-    documentation: std.ArrayList(u8),
 };
 
-/// parses a `langref.html.in` file and extracts builtins from this section: `https://ziglang.org/documentation/master/#Builtin-Functions`
-/// the documentation field contains poorly formatted html
-fn collectBuiltinData(allocator: std.mem.Allocator, version: []const u8, langref_file: []const u8) error{OutOfMemory}![]Builtin {
+/// Parses a `langref.html.in` file and extracts the name and signature of every builtin
+/// function documented in this section: `https://ziglang.org/documentation/master/#Builtin-Functions`
+///
+/// The prose documentation for each builtin is intentionally not collected here; hover/completion
+/// documentation is instead a generated link to the online Language Reference (see `TODO.md`).
+fn collectBuiltinData(allocator: std.mem.Allocator, langref_file: []const u8) error{OutOfMemory}![]Builtin {
     var tokenizer: Tokenizer = .{ .buffer = langref_file };
 
     const State = enum {
@@ -461,31 +463,19 @@ fn collectBuiltinData(allocator: std.mem.Allocator, version: []const u8, langref
         /// every entry begins with this:
         /// {#syntax#}@addrSpaceCast(comptime addrspace: std.builtin.AddressSpace, ptr: anytype) anytype{#endsyntax#}
         builtin_begin,
-        /// iterate over documentation
+        /// skipping over documentation prose until the next builtin or the end of the section
         builtin_content,
     };
     var state: State = .searching;
 
     var builtins: std.ArrayList(Builtin) = .empty;
-    errdefer {
-        for (builtins.items) |*builtin| {
-            builtin.documentation.deinit(allocator);
-        }
-        builtins.deinit(allocator);
-    }
+    errdefer builtins.deinit(allocator);
 
     var depth: u32 = undefined;
     while (true) {
         const token = tokenizer.next();
         switch (token.id) {
-            .Content => {
-                switch (state) {
-                    .builtin_content => {
-                        try builtins.items[builtins.items.len - 1].documentation.appendSlice(allocator, tokenizer.buffer[token.start..token.end]);
-                    },
-                    else => continue,
-                }
-            },
+            .Content => continue,
             .BracketOpen => {
                 const tag_token = tokenizer.next();
                 std.debug.assert(tag_token.id == .TagContent);
@@ -509,7 +499,6 @@ fn collectBuiltinData(allocator: std.mem.Allocator, version: []const u8, langref
                             try builtins.append(allocator, .{
                                 .name = content_name,
                                 .signature = "",
-                                .documentation = .empty,
                             });
                         },
                         .builtin_content => unreachable,
@@ -536,7 +525,7 @@ fn collectBuiltinData(allocator: std.mem.Allocator, version: []const u8, langref
                         depth -= 1;
                         if (depth == 0) break;
                     }
-                } else if (state != .searching and std.mem.eql(u8, tag_name, "syntax")) {
+                } else if (state == .builtin_begin and std.mem.eql(u8, tag_name, "syntax")) {
                     std.debug.assert(tokenizer.next().id == .BracketClose);
                     const content_tag = tokenizer.next();
                     std.debug.assert(content_tag.id == .Content);
@@ -548,120 +537,8 @@ fn collectBuiltinData(allocator: std.mem.Allocator, version: []const u8, langref
                     std.debug.assert(std.mem.eql(u8, end_tag_name, "endsyntax"));
                     std.debug.assert(tokenizer.next().id == .BracketClose);
 
-                    switch (state) {
-                        .builtin_begin => {
-                            builtins.items[builtins.items.len - 1].signature = content_name;
-                            state = .builtin_content;
-                        },
-                        .builtin_content => {
-                            const documentation = &builtins.items[builtins.items.len - 1].documentation;
-
-                            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, documentation);
-                            defer aw.deinit();
-                            writeMarkdownCode(content_name, "zig", &aw.writer) catch return error.OutOfMemory;
-                            documentation.* = aw.toArrayList();
-                        },
-                        else => {},
-                    }
-                } else if (state != .searching and std.mem.eql(u8, tag_name, "syntax_block")) {
-                    std.debug.assert(tokenizer.next().id == .Separator);
-
-                    const source_type_tag = tokenizer.next();
-                    std.debug.assert(tag_token.id == .TagContent);
-                    const source_type = tokenizer.buffer[source_type_tag.start..source_type_tag.end];
-                    switch (tokenizer.next().id) {
-                        .Separator => {
-                            std.debug.assert(tokenizer.next().id == .TagContent);
-                            std.debug.assert(tokenizer.next().id == .BracketClose);
-                        },
-                        .BracketClose => {},
-                        else => unreachable,
-                    }
-
-                    const content_token = tokenizer.next();
-                    std.debug.assert(content_token.id == .Content);
-                    const content = tokenizer.buffer[content_token.start..content_token.end];
-                    const documentation = &builtins.items[builtins.items.len - 1].documentation;
-
-                    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, documentation);
-                    defer aw.deinit();
-                    writeMarkdownCode(content, source_type, &aw.writer) catch return error.OutOfMemory;
-                    documentation.* = aw.toArrayList();
-
-                    std.debug.assert(tokenizer.next().id == .BracketOpen);
-                    const end_code_token = tokenizer.next();
-                    std.debug.assert(tag_token.id == .TagContent);
-                    const end_code_name = tokenizer.buffer[end_code_token.start..end_code_token.end];
-                    std.debug.assert(std.mem.eql(u8, end_code_name, "end_syntax_block"));
-                    std.debug.assert(tokenizer.next().id == .BracketClose);
-                } else if (state != .searching and std.mem.eql(u8, tag_name, "link")) {
-                    std.debug.assert(tokenizer.next().id == .Separator);
-                    const name_token = tokenizer.next();
-                    std.debug.assert(name_token.id == .TagContent);
-                    const name = tokenizer.buffer[name_token.start..name_token.end];
-
-                    const url_name = switch (tokenizer.next().id) {
-                        .Separator => blk: {
-                            const url_name_token = tokenizer.next();
-                            std.debug.assert(url_name_token.id == .TagContent);
-                            const url_name = tokenizer.buffer[url_name_token.start..url_name_token.end];
-                            std.debug.assert(tokenizer.next().id == .BracketClose);
-                            break :blk url_name;
-                        },
-                        .BracketClose => name,
-                        else => unreachable,
-                    };
-
-                    const spaceless_url_name = try std.mem.replaceOwned(u8, allocator, url_name, " ", "-");
-                    defer allocator.free(spaceless_url_name);
-
-                    const documentation = &builtins.items[builtins.items.len - 1].documentation;
-                    try documentation.print(allocator, "[{s}](https://ziglang.org/documentation/{s}/#{s})", .{
-                        name,
-                        version,
-                        std.mem.trimStart(u8, spaceless_url_name, "@"),
-                    });
-                } else if (state != .searching and std.mem.eql(u8, tag_name, "code_begin")) {
-                    std.debug.assert(tokenizer.next().id == .Separator);
-                    std.debug.assert(tokenizer.next().id == .TagContent);
-                    switch (tokenizer.next().id) {
-                        .Separator => {
-                            std.debug.assert(tokenizer.next().id == .TagContent);
-                            switch (tokenizer.next().id) {
-                                .Separator => {
-                                    std.debug.assert(tokenizer.next().id == .TagContent);
-                                    std.debug.assert(tokenizer.next().id == .BracketClose);
-                                },
-                                .BracketClose => {},
-                                else => unreachable,
-                            }
-                        },
-                        .BracketClose => {},
-                        else => unreachable,
-                    }
-
-                    while (true) {
-                        const content_token = tokenizer.next();
-                        std.debug.assert(content_token.id == .Content);
-                        const content = tokenizer.buffer[content_token.start..content_token.end];
-                        std.debug.assert(tokenizer.next().id == .BracketOpen);
-                        const end_code_token = tokenizer.next();
-                        std.debug.assert(end_code_token.id == .TagContent);
-                        const end_tag_name = tokenizer.buffer[end_code_token.start..end_code_token.end];
-
-                        if (std.mem.eql(u8, end_tag_name, "code_end")) {
-                            std.debug.assert(tokenizer.next().id == .BracketClose);
-
-                            const documentation = &builtins.items[builtins.items.len - 1].documentation;
-
-                            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, documentation);
-                            defer aw.deinit();
-                            writeMarkdownCode(content, "zig", &aw.writer) catch return error.OutOfMemory;
-                            documentation.* = aw.toArrayList();
-                            break;
-                        }
-                        std.debug.assert(tokenizer.next().id == .BracketClose);
-                    }
+                    builtins.items[builtins.items.len - 1].signature = content_name;
+                    state = .builtin_content;
                 } else {
                     while (true) {
                         switch (tokenizer.next().id) {
@@ -679,128 +556,8 @@ fn collectBuiltinData(allocator: std.mem.Allocator, version: []const u8, langref
     return try builtins.toOwnedSlice(allocator);
 }
 
-/// single line: \`{content}\`
-/// multi line:
-/// \`\`\`{source_type}
-/// {content}
-/// \`\`\`
-fn writeMarkdownCode(content: []const u8, source_type: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    const trimmed_content = std.mem.trim(u8, content, " \n");
-    const is_multiline = std.mem.findScalar(u8, trimmed_content, '\n') != null;
-    if (is_multiline) {
-        var line_it = std.mem.tokenizeScalar(u8, trimmed_content, '\n');
-        try writer.print("\n```{s}", .{source_type});
-        while (line_it.next()) |line| {
-            try writer.print("\n{s}", .{line});
-        }
-        try writer.writeAll("\n```");
-    } else {
-        try writer.print("`{s}`", .{trimmed_content});
-    }
-}
-
-fn writeLine(str: []const u8, single_line: bool, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    const trimmed_content = std.mem.trim(u8, str, &std.ascii.whitespace);
-    if (trimmed_content.len == 0) return;
-
-    if (single_line) {
-        var line_it = std.mem.splitScalar(u8, trimmed_content, '\n');
-        while (line_it.next()) |line| {
-            try writer.print("{s} ", .{std.mem.trim(u8, line, &std.ascii.whitespace)});
-        }
-    } else {
-        try writer.writeAll(trimmed_content);
-    }
-
-    try writer.writeByte('\n');
-}
-
-/// converts text with various html tags into markdown
-/// supported tags:
-/// - `<p>`
-/// - `<pre>`
-/// - `<em>`
-/// - `<ul>` and `<li>`
-/// - `<a>`
-/// - `<code>`
-fn writeMarkdownFromHtml(html: []const u8, writer: *std.Io.Writer) !void {
-    return writeMarkdownFromHtmlInternal(html, false, 0, writer);
-}
-
-/// this is kind of a hacky solution. A cleaner solution would be to implement using a xml/html parser.
-fn writeMarkdownFromHtmlInternal(html: []const u8, single_line: bool, depth: u32, writer: *std.Io.Writer) !void {
-    var index: usize = 0;
-    while (std.mem.findScalarPos(u8, html, index, '<')) |tag_start_index| {
-        const tags: []const []const u8 = &.{ "pre", "p", "em", "ul", "li", "a", "code" };
-        const opening_tags: []const []const u8 = &.{ "<pre>", "<p>", "<em>", "<ul>", "<li>", "<a>", "<code>" };
-        const closing_tags: []const []const u8 = &.{ "</pre>", "</p>", "</em>", "</ul>", "</li>", "</a>", "</code>" };
-        const tag_index = for (tags, 0..) |tag_name, i| {
-            if (std.mem.startsWith(u8, html[tag_start_index + 1 ..], tag_name)) break i;
-        } else {
-            index += 1;
-            continue;
-        };
-
-        try writeLine(html[index..tag_start_index], single_line, writer);
-
-        const tag_name = tags[tag_index];
-        const opening_tag_name = opening_tags[tag_index];
-        const closing_tag_name = closing_tags[tag_index];
-
-        // std.debug.print("tag: '{s}'\n", .{tag_name});
-
-        const content_start = 1 + (std.mem.findScalarPos(u8, html, tag_start_index + 1 + tag_name.len, '>') orelse return error.InvalidTag);
-
-        index = content_start;
-        const content_end = while (std.mem.findScalarPos(u8, html, index, '<')) |end| {
-            if (std.mem.startsWith(u8, html[end..], closing_tag_name)) break end;
-            if (std.mem.startsWith(u8, html[end..], opening_tag_name)) {
-                index = std.mem.findPos(u8, html, end + opening_tag_name.len, closing_tag_name) orelse return error.MissingEndTag;
-                index += closing_tag_name.len;
-                continue;
-            }
-            index += 1;
-        } else html.len;
-
-        const content = html[content_start..content_end];
-        index = @min(html.len, content_end + closing_tag_name.len);
-        // std.debug.print("content: {s}\n", .{content});
-
-        if (std.mem.eql(u8, tag_name, "p")) {
-            try writeMarkdownFromHtmlInternal(content, true, depth, writer);
-            try writer.writeByte('\n');
-        } else if (std.mem.eql(u8, tag_name, "pre")) {
-            try writeMarkdownFromHtmlInternal(content, false, depth, writer);
-        } else if (std.mem.eql(u8, tag_name, "em")) {
-            try writer.print("**{s}** ", .{content});
-        } else if (std.mem.eql(u8, tag_name, "ul")) {
-            try writeMarkdownFromHtmlInternal(content, false, depth + 1, writer);
-        } else if (std.mem.eql(u8, tag_name, "li")) {
-            try writer.splatByteAll(' ', 1 + (depth -| 1) * 2);
-            try writer.writeAll("- ");
-            try writeMarkdownFromHtmlInternal(content, true, depth, writer);
-        } else if (std.mem.eql(u8, tag_name, "a")) {
-            const href_part = std.mem.trimStart(u8, html[tag_start_index + 2 .. content_start - 1], " ");
-            std.debug.assert(std.mem.startsWith(u8, href_part, "href=\""));
-            std.debug.assert(href_part[href_part.len - 1] == '"');
-            const url = href_part["href=\"".len .. href_part.len - 1];
-            try writer.print("[{s}]({s})", .{ content, std.mem.trimStart(u8, url, "@") });
-        } else if (std.mem.eql(u8, tag_name, "code")) {
-            try writeMarkdownCode(content, "zig", writer);
-        } else return error.UnsupportedTag;
-    }
-
-    try writeLine(html[index..], single_line, writer);
-}
-
 const Parameter = struct {
-    documentation: ?[]const u8,
     signature: []const u8,
-
-    fn deinit(param: *Parameter, allocator: std.mem.Allocator) void {
-        if (param.documentation) |doc| allocator.free(doc);
-        param.* = undefined;
-    }
 };
 
 /// takes in a signature (without name or leading parenthesis) like this:
@@ -809,14 +566,9 @@ const Parameter = struct {
 /// `comptime DestType: type`, `integer: anytype`, `DestType`
 fn extractParametersAndReturnTypeFromSignature(allocator: std.mem.Allocator, signature: [:0]const u8) error{OutOfMemory}!struct { []Parameter, []const u8 } {
     var parameters: std.ArrayList(Parameter) = .empty;
-    errdefer {
-        for (parameters.items) |*param| param.deinit(allocator);
-        defer parameters.deinit(allocator);
-    }
+    errdefer parameters.deinit(allocator);
 
     var tokenizer: std.zig.Tokenizer = .init(signature);
-    var documentation: std.ArrayList(u8) = .empty;
-    defer documentation.deinit(allocator);
     var argument_start: ?usize = null;
     while (true) {
         const token = tokenizer.next();
@@ -836,15 +588,11 @@ fn extractParametersAndReturnTypeFromSignature(allocator: std.mem.Allocator, sig
             .comma, .r_paren => |tag| {
                 if (argument_start) |start| {
                     try parameters.append(allocator, .{
-                        .documentation = if (documentation.items.len != 0) try documentation.toOwnedSlice(allocator) else null,
                         .signature = std.mem.trim(u8, signature[start..token.loc.start], &std.ascii.whitespace),
                     });
                 }
                 argument_start = null;
                 if (tag == .r_paren) break;
-            },
-            .doc_comment, .container_doc_comment => {
-                try documentation.print(allocator, "{s}\n", .{signature[token.loc.start + "///".len .. token.loc.end]});
             },
             else => {
                 if (argument_start == null) {
@@ -858,26 +606,23 @@ fn extractParametersAndReturnTypeFromSignature(allocator: std.mem.Allocator, sig
     return .{ try parameters.toOwnedSlice(allocator), return_type };
 }
 
-/// Generates data files from the Zig language Reference (https://ziglang.org/documentation/master/)
-/// Output example: https://github.com/zigtools/zls/blob/0.11.0/src/data/master.zig
+/// Generates a data file describing the name, parameters, and return type of every builtin
+/// function documented in the Zig Language Reference (https://ziglang.org/documentation/master/).
+///
+/// Prose documentation is deliberately not embedded here: hover/completion/signature-help
+/// documentation for builtins is rendered as a link to the online Language Reference instead
+/// (see `Analyser.renderBuiltinFunctionDocumentationLink`).
 fn generateVersionDataFile(
     io: std.Io,
     allocator: std.mem.Allocator,
-    version: []const u8,
     output_path: []const u8,
     langref_path: []const u8,
 ) !void {
-    // const langref_source: []const u8 = @embedFile("langref.html.in");
     const langref_source = try std.Io.Dir.cwd().readFileAlloc(io, langref_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(langref_source);
 
-    const builtins = try collectBuiltinData(allocator, version, langref_source);
-    defer {
-        for (builtins) |*builtin| {
-            builtin.documentation.deinit(allocator);
-        }
-        allocator.free(builtins);
-    }
+    const builtins = try collectBuiltinData(allocator, langref_source);
+    defer allocator.free(builtins);
 
     var builtin_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
     defer builtin_file.close(io);
@@ -894,12 +639,10 @@ fn generateVersionDataFile(
         \\
         \\pub const Builtin = struct {
         \\    return_type: []const u8,
-        \\    documentation: []const u8,
         \\    parameters: []const Parameter,
         \\
         \\    pub const Parameter = struct {
         \\        signature: []const u8,
-        \\        documentation: ?[]const u8,
         \\    };
         \\};
         \\
@@ -917,63 +660,29 @@ fn generateVersionDataFile(
         defer allocator.free(signature_with_sentinel);
 
         const parameters, const return_type = try extractParametersAndReturnTypeFromSignature(allocator, signature_with_sentinel);
-        defer {
-            for (parameters) |*param| param.deinit(allocator);
-            defer allocator.free(parameters);
-        }
+        defer allocator.free(parameters);
 
         try writer.print(
             \\    .{{
             \\        "{f}",
             \\        .{{
             \\            .return_type = "{f}",
+            \\            .parameters = &.{{
             \\
         , .{
             std.zig.fmtString(builtin.name),
             std.zig.fmtString(return_type),
         });
 
-        const html = builtin.documentation.items["</pre>".len..];
-        var markdown: std.Io.Writer.Allocating = .init(allocator);
-        defer markdown.deinit();
-        writeMarkdownFromHtml(html, &markdown.writer) catch return error.OutOfMemory;
-
-        try writer.writeAll("            .documentation =\n");
-        var line_it = std.mem.splitScalar(u8, std.mem.trim(u8, markdown.written(), "\n"), '\n');
-        while (line_it.next()) |line| {
-            try writer.print("            \\\\{s}\n", .{std.mem.trimEnd(u8, line, " ")});
+        for (parameters) |param| {
+            try writer.print(
+                \\                .{{ .signature = "{f}" }},
+                \\
+            , .{std.zig.fmtString(param.signature)});
         }
 
         try writer.writeAll(
-            \\            ,
-            \\            .parameters = &.{
-        );
-
-        if (parameters.len != 0) {
-            try writer.writeByte('\n');
-            for (parameters) |param| {
-                try writer.print(
-                    \\                .{{
-                    \\                    .signature = "{f}",
-                    \\
-                , .{
-                    std.zig.fmtString(param.signature),
-                });
-                if (param.documentation) |doc| {
-                    try writer.print("                    .documentation = \"{f}\",\n", .{
-                        std.zig.fmtString(doc),
-                    });
-                } else {
-                    try writer.writeAll("                    .documentation = null,\n");
-                }
-                try writer.writeAll("                },\n");
-            }
-            try writer.writeAll("            },\n");
-        } else {
-            try writer.writeAll("},\n");
-        }
-
-        try writer.writeAll(
+            \\            },
             \\        },
             \\    },
             \\
@@ -1006,7 +715,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var vscode_config_path: ?[]const u8 = null;
     var version_data_path: ?[]const u8 = null;
     var langref_path: ?[]const u8 = null;
-    var langref_version: ?[]const u8 = null;
 
     while (args_it.next()) |argname| {
         if (std.mem.eql(u8, argname, "--help")) {
@@ -1020,7 +728,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\  --generate-schema [path]         Output json schema file (see schema.json)
                 \\  --generate-version-data [path]   Output data file
                 \\  --langref-path [path]            Input langref.html.in file path
-                \\  --langref-version [version]      Input langref.html.in version
                 \\
             );
             return std.process.cleanExit(io);
@@ -1044,18 +751,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             langref_path = args_it.next() orelse {
                 std.process.fatal("Expected output path after --langref-path argument.\n", .{});
             };
-        } else if (std.mem.eql(u8, argname, "--langref-version")) {
-            langref_version = args_it.next() orelse {
-                std.process.fatal("Expected version after --langref-version argument.\n", .{});
-            };
-            const is_valid_version = blk: {
-                if (std.mem.eql(u8, langref_version.?, "master")) break :blk true;
-                _ = std.SemanticVersion.parse(langref_version.?) catch break :blk false;
-                break :blk true;
-            };
-            if (!is_valid_version) {
-                std.process.fatal("'{s}' is not a valid argument after --langref-version.\n", .{langref_version.?});
-            }
         } else {
             std.process.fatal("Unrecognized argument '{s}'.\n", .{argname});
         }
@@ -1083,7 +778,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try generateVersionDataFile(
             io,
             gpa,
-            langref_version orelse std.process.fatal("--generate-version-data requires --langref-version to be specified", .{}),
             output_path,
             langref_path orelse std.process.fatal("--generate-version-data requires --langref-path to be specified", .{}),
         );

@@ -250,13 +250,14 @@ fn hoverDefinitionBuiltin(
         builtin,
         builtin.parameters.len > 3,
     );
+    const documentation_link = try Analyser.renderBuiltinFunctionDocumentationLink(arena, name);
 
     switch (markup_kind) {
         .plaintext, .unknown_value => {
             try contents.print(arena,
                 \\{s}
                 \\{s}
-            , .{ signature, builtin.documentation });
+            , .{ signature, documentation_link });
         },
         .markdown => {
             try contents.print(arena,
@@ -264,7 +265,7 @@ fn hoverDefinitionBuiltin(
                 \\{s}
                 \\```
                 \\{s}
-            , .{ signature, builtin.documentation });
+            , .{ signature, documentation_link });
         },
     }
 

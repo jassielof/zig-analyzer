@@ -673,7 +673,7 @@ fn completeBuiltin(builder: *Builder) error{OutOfMemory}!void {
             .documentation = .{
                 .markup_content = .{
                     .kind = if (builder.server.client_capabilities.completion_doc_supports_md) .markdown else .plaintext,
-                    .value = builtin.documentation,
+                    .value = try Analyser.renderBuiltinFunctionDocumentationLink(builder.arena, name),
                 },
             },
         });
