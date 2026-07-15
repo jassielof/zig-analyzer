@@ -3,6 +3,11 @@
 zig-out
 zig-pkg
 
+# Generated Language Reference artifacts (produced by markitdown + config_gen)
+tools/config_gen/langref.md
+tools/config_gen/_raw_sample.md
+tools/config_gen/builtins.json
+
 # Node
 node_modules
 dist

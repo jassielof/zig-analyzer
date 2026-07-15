@@ -1,8 +1,8 @@
 //! Builtin function metadata sourced from the Zig Language Reference.
 //!
-//! The structured data lives in a generated `builtins.json` (produced by
-//! `tools/config_gen/builtin_serializer.zig` from `tools/config_gen/langref.md`)
-//! which is embedded via `--embed-dir` at build time and parsed once lazily.
+//! Build pipeline: Markitdown fetches the rendered docs page, then
+//! `tools/config_gen/builtin_serializer.zig` extracts/serializes builtins into
+//! `builtins.json`, which is embedded and parsed once lazily at runtime.
 const std = @import("std");
 
 pub const Builtin = struct {

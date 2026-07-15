@@ -1,9 +1,10 @@
 //! Serializes Zig Language Reference Builtin Functions Markdown into a
 //! structured JSON schema consumed by zig-analyzer at runtime.
 //!
-//! Input: `tools/config_gen/langref.md` (Markitdown conversion of the
-//! rendered docs Builtin Functions section).
-//! Output: a JSON object keyed by builtin name (`@alignOf`, …).
+//! Input: Markdown produced by Markitdown from the rendered Zig docs page
+//! (`https://ziglang.org/documentation/<version>/`). Zig extracts the Builtin
+//! Functions section, cleans heading decorations, strips figure captions /
+//! shell output, and emits JSON keyed by builtin name (`@alignOf`, …).
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -16,6 +17,11 @@ pub const Builtin = struct {
     return_type: []const u8,
     documentation: []const u8,
     examples: []const []const u8 = &.{},
+};
+
+const PreprocessError = error{
+    OutOfMemory,
+    BuiltinFunctionsSectionNotFound,
 };
 
 /// Takes a signature without name or leading parenthesis, e.g.
@@ -133,6 +139,100 @@ fn freeBuiltin(allocator: std.mem.Allocator, value: Builtin) void {
     allocator.free(value.documentation);
     for (value.examples) |ex| allocator.free(ex);
     allocator.free(value.examples);
+}
+
+/// Clean Markitdown heading decorations:
+/// `### [@addrSpaceCast](#toc-addrSpaceCast) [§](#addrSpaceCast)` → `### @addrSpaceCast`
+fn cleanHeadingLine(allocator: std.mem.Allocator, line: []const u8) error{OutOfMemory}![]u8 {
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    var hashes: usize = 0;
+    while (hashes < trimmed.len and trimmed[hashes] == '#') hashes += 1;
+    if (hashes == 0 or hashes >= trimmed.len or trimmed[hashes] != ' ') {
+        return try allocator.dupe(u8, trimmed);
+    }
+
+    const rest = std.mem.trim(u8, trimmed[hashes + 1 ..], &std.ascii.whitespace);
+    const title = blk: {
+        if (rest.len > 0 and rest[0] == '[') {
+            if (std.mem.indexOfScalar(u8, rest, ']')) |end| {
+                break :blk rest[1..end];
+            }
+        }
+        // Already plain, or unexpected form — strip trailing link decorations.
+        var plain = rest;
+        if (std.mem.indexOf(u8, plain, " [")) |idx| {
+            plain = std.mem.trim(u8, plain[0..idx], &std.ascii.whitespace);
+        }
+        break :blk plain;
+    };
+
+    return try std.fmt.allocPrint(allocator, "{s} {s}", .{ trimmed[0..hashes], title });
+}
+
+/// Extract the Builtin Functions section from a full Language Reference Markdown
+/// page and normalize headings to plain `##` / `###` form.
+fn preprocessLangrefMarkdown(allocator: std.mem.Allocator, full_markdown: []const u8) PreprocessError![]u8 {
+    const normalized = try std.mem.replaceOwned(u8, allocator, full_markdown, "\r\n", "\n");
+    defer allocator.free(normalized);
+
+    // Find the `## … Builtin Functions …` line.
+    var section_start: ?usize = null;
+    var search: usize = 0;
+    while (search < normalized.len) {
+        const line_end = std.mem.indexOfScalar(u8, normalized[search..], '\n') orelse normalized.len - search;
+        const line = normalized[search .. search + line_end];
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "##") and !std.mem.startsWith(u8, trimmed, "###") and
+            std.mem.indexOf(u8, trimmed, "Builtin Functions") != null)
+        {
+            section_start = search;
+            break;
+        }
+        if (search + line_end >= normalized.len) break;
+        search += line_end + 1;
+    }
+
+    const start = section_start orelse return error.BuiltinFunctionsSectionNotFound;
+
+    // Find the next sibling `## ` heading after the section start.
+    var section_end = normalized.len;
+    search = start;
+    var first_line = true;
+    while (search < normalized.len) {
+        const line_end = std.mem.indexOfScalar(u8, normalized[search..], '\n') orelse normalized.len - search;
+        const line = normalized[search .. search + line_end];
+        if (!first_line) {
+            const trimmed = std.mem.trimStart(u8, line, " \t");
+            if (std.mem.startsWith(u8, trimmed, "##") and !std.mem.startsWith(u8, trimmed, "###")) {
+                section_end = search;
+                break;
+            }
+        }
+        first_line = false;
+        if (search + line_end >= normalized.len) break;
+        search += line_end + 1;
+    }
+
+    const section = normalized[start..section_end];
+
+    // Clean heading lines within the section.
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var lines = std.mem.splitScalar(u8, section, '\n');
+    var first = true;
+    while (lines.next()) |line| {
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        const trimmed_start = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed_start, "#")) {
+            const cleaned = try cleanHeadingLine(allocator, line);
+            defer allocator.free(cleaned);
+            try out.appendSlice(allocator, cleaned);
+        } else {
+            try out.appendSlice(allocator, line);
+        }
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 const SectionParts = struct {
@@ -323,14 +423,23 @@ pub fn collectBuiltins(
     return result;
 }
 
-/// Parse `langref.md` and write the builtins JSON object to `output_path`.
+/// Parse Markitdown Language Reference Markdown and write builtins JSON.
 pub fn generateBuiltinsJson(
     io: std.Io,
     allocator: std.mem.Allocator,
     output_path: []const u8,
     langref_path: []const u8,
 ) !void {
-    const markdown = try std.Io.Dir.cwd().readFileAlloc(io, langref_path, allocator, .limited(16 * 1024 * 1024));
+    const raw_markdown = try std.Io.Dir.cwd().readFileAlloc(io, langref_path, allocator, .limited(32 * 1024 * 1024));
+    defer allocator.free(raw_markdown);
+
+    const markdown = preprocessLangrefMarkdown(allocator, raw_markdown) catch |err| switch (err) {
+        error.BuiltinFunctionsSectionNotFound => std.process.fatal(
+            "Builtin Functions section not found in '{s}'. Is Markitdown output the Zig Language Reference?",
+            .{langref_path},
+        ),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     defer allocator.free(markdown);
 
     var builtins_map = try collectBuiltins(allocator, markdown);
@@ -341,6 +450,13 @@ pub fn generateBuiltinsJson(
             freeBuiltin(allocator, entry.value_ptr.*);
         }
         builtins_map.deinit(allocator);
+    }
+
+    if (builtins_map.count() == 0) {
+        std.process.fatal(
+            "no builtins extracted from '{s}' (is Markitdown output missing ### @name headings?)",
+            .{langref_path},
+        );
     }
 
     const json_map: std.json.ArrayHashMap(Builtin) = .{ .map = builtins_map };

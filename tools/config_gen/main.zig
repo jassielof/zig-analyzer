@@ -2,7 +2,7 @@
 //!
 //! - generate `internal/zig_analyzer/Config.zig`
 //! - generate `schema.json`
-//! - generate metadata about Zig's builtins (uses `tools/config_gen/langref.md`)
+//! - generate metadata about Zig's builtins (from Markitdown Language Reference Markdown)
 //! - generate ZLS configuration options for vscode-zig's package.json
 const std = @import("std");
 const builtin_serializer = @import("builtin_serializer.zig");
@@ -347,8 +347,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\  --generate-vscode-config [path]    Output zls-vscode configurations
                 \\  --generate-config [path]           Output path to config file (see internal/zig_analyzer/Config.zig)
                 \\  --generate-schema [path]           Output json schema file (see schema.json)
-                \\  --generate-builtins-json [path]    Output builtins JSON (see tools/config_gen/langref.md)
-                \\  --langref-path [path]              Input langref.md file path
+                \\  --generate-builtins-json [path]    Output builtins JSON from Markitdown langref Markdown
+                \\  --langref-path [path]              Input langref Markdown (Markitdown output)
                 \\
             );
             return std.process.cleanExit(io);

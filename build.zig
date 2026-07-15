@@ -46,11 +46,20 @@ pub fn build(b: *std.Build) !void {
     });
 
     const version_data_module = blk: {
+        // Fetch + convert the rendered Language Reference via Markitdown CLI.
+        // Output is cached by the Zig build system keyed on the command line
+        // (including the docs URL / compiler version).
+        const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{builtin.zig_version_string});
+        const markitdown = b.addSystemCommand(&.{"markitdown"});
+        markitdown.setName("markitdown langref");
+        markitdown.addArg("--output");
+        const langref_md = markitdown.addOutputFileArg("langref.md");
+        markitdown.addArg(docs_url);
+        markitdown.expectExitCode(0);
+
         const gen_builtins_cmd = b.addRunArtifact(gen_exe);
-
         gen_builtins_cmd.addArg("--langref-path");
-        gen_builtins_cmd.addFileArg(b.path("tools/config_gen/langref.md"));
-
+        gen_builtins_cmd.addFileArg(langref_md);
         gen_builtins_cmd.addArg("--generate-builtins-json");
         const builtins_json_path = gen_builtins_cmd.addOutputFileArg("builtins.json");
 
