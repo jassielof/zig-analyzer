@@ -120,6 +120,7 @@ async function restart(): Promise<void> {
   await start();
 }
 
+// TODO: It should try by default to look for the zig-analyzer binary in the PATH.
 function getServerPath(): string | undefined {
   const configured = vscode.workspace
     .getConfiguration("zigAnalyzer")
