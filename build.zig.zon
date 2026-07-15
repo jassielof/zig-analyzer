@@ -6,6 +6,7 @@
     .dependencies = .{
         .dmp = .{ .path = "dependencies/dmp" },
         .docent = .{ .path = "dependencies/docent" },
+        .fangz = .{ .path = "dependencies/docent/dependencies/fangz" },
         .known_folders = .{
             .url = "https://github.com/ziglibs/known-folders/archive/d6d03830968cca6b7b9f24fd97ee348346a6905d.tar.gz",
             .hash = "known_folders-0.0.0-Fy-PJk3KAACzUg2us_0JvQQmod1ZA8jBt7MuoKCihq88",
