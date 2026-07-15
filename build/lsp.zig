@@ -88,12 +88,10 @@ pub fn addLspTests(
     b: *std.Build,
     test_step: *std.Build.Step,
     modules: Modules,
-    test_filters: []const []const u8,
     use_llvm: ?bool,
 ) void {
     const lsp_tests = b.addTest(.{
         .root_module = modules.lsp,
-        .filters = test_filters,
         .use_lld = use_llvm,
         .use_llvm = use_llvm,
     });
@@ -101,7 +99,6 @@ pub fn addLspTests(
     const lsp_parser_tests = b.addTest(.{
         .name = "test lsp parser",
         .root_module = modules.parser,
-        .filters = test_filters,
         .use_lld = use_llvm,
         .use_llvm = use_llvm,
     });

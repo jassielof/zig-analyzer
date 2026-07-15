@@ -8,23 +8,11 @@ const zig_analyzer_build = @import("build/zig_analyzer.zig");
 
 const package_version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch unreachable;
 
-// TODO: Remove this, the minimum runtime version will always match the Zig version used to build the LSP. Unless there's really a reason why including the min runtime version is useful.
-const minimum_runtime_zig_version = "0.16.0";
-
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // TODO: No option for single-threaded unless justified, just accept whatever default Zig uses.
-    const single_threaded = b.option(bool, "single-threaded", "Build a single threaded Executable");
-    // TODO: No idea what PIE might be for. Investigate.
-    const pie = b.option(bool, "pie", "Build a Position Independent Executable");
-    // TODO: No need to strip the executable, accept default, which is no stripping, for safety and debugging purposes.
-    const strip = b.option(bool, "strip", "Strip executable");
-    // TODO: No idea what tests might be filtered for, investigate.
-    const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match filter") orelse &.{};
-    // TODO: Also remove this, unless there's a reason to not use LLVM, since LLVM is just more robust, mature and polished than Zig's.
-    var use_llvm = b.option(bool, "use-llvm", "Use Zig's llvm code backend");
+    var use_llvm: ?bool = null;
 
     const resolved_version = version_build.getVersion(b, package_version);
 
@@ -34,7 +22,7 @@ pub fn build(b: *std.Build) !void {
 
         build_options.addOption(std.SemanticVersion, "version", resolved_version);
         build_options.addOption([]const u8, "version_string", b.fmt("{f}", .{resolved_version}));
-        build_options.addOption([]const u8, "minimum_runtime_zig_version_string", minimum_runtime_zig_version);
+        build_options.addOption([]const u8, "minimum_runtime_zig_version_string", builtin.zig_version_string);
 
         break :blk build_options.createModule();
     };
@@ -124,9 +112,6 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("cmd/zig-analyzer/main.zig"),
         .target = target,
         .optimize = optimize,
-        .single_threaded = single_threaded,
-        .pic = pie,
-        .strip = strip,
         .imports = &.{
             .{ .name = "exe_options", .module = exe_options },
             .{ .name = "known-folders", .module = known_folders_module },
@@ -161,12 +146,11 @@ pub fn build(b: *std.Build) !void {
         const src_tests = b.addTest(.{
             .name = "zig_analyzer src test",
             .root_module = zig_analyzer_module,
-            .filters = test_filters,
             .use_llvm = use_llvm,
             .use_lld = use_llvm,
         });
         test_step.dependOn(&b.addRunArtifact(src_tests).step);
 
-        lsp_build.addLspTests(b, test_step, lsp_modules, test_filters, use_llvm);
+        lsp_build.addLspTests(b, test_step, lsp_modules, use_llvm);
     }
 }
