@@ -71,6 +71,46 @@ fn isShellLikeCode(code: []const u8) bool {
     return trimmed[0] == '$';
 }
 
+/// Markitdown leaves HTML `<figcaption>` text as bare prose lines before fences:
+/// - `Shell` for shell output figures
+/// - `some\_file.zig` / `builtin.CallModifier struct.zig` for Zig source figures
+fn isFigureCaptionLine(allocator: std.mem.Allocator, line: []const u8) error{OutOfMemory}!bool {
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    if (trimmed.len == 0) return false;
+    if (std.mem.eql(u8, trimmed, "Shell")) return true;
+
+    // Unescape Markdown `\_` so `test\_this\_builtin.zig` matches as a filename.
+    const unescaped = try std.mem.replaceOwned(u8, allocator, trimmed, "\\_", "_");
+    defer allocator.free(unescaped);
+    return std.mem.endsWith(u8, unescaped, ".zig");
+}
+
+/// Collapse runs of blank lines (keep at most one) and trim edges.
+fn normalizeDocumentationWhitespace(allocator: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var blank_run: usize = 0;
+    var started = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const is_blank = std.mem.trim(u8, line, &std.ascii.whitespace).len == 0;
+        if (is_blank) {
+            if (!started) continue;
+            blank_run += 1;
+            continue;
+        }
+        if (blank_run > 0) {
+            try out.append(allocator, '\n');
+            blank_run = 0;
+        }
+        if (started) try out.append(allocator, '\n');
+        try out.appendSlice(allocator, line);
+        started = true;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn absolutizeFragmentLinks(allocator: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]u8 {
     const normalized = try std.mem.replaceOwned(u8, allocator, text, "\r\n", "\n");
     defer allocator.free(normalized);
@@ -151,6 +191,8 @@ fn parseBuiltinSection(allocator: std.mem.Allocator, section: []const u8) error{
         if (in_fence) {
             if (fence_body.items.len != 0) try fence_body.append(allocator, '\n');
             try fence_body.appendSlice(allocator, line);
+        } else if (try isFigureCaptionLine(allocator, line)) {
+            // Drop Markitdown figcaption leftovers (`Shell`, `foo.zig`).
         } else {
             if (documentation.items.len != 0) try documentation.append(allocator, '\n');
             try documentation.appendSlice(allocator, line);
@@ -165,7 +207,7 @@ fn parseBuiltinSection(allocator: std.mem.Allocator, section: []const u8) error{
     };
 
     const doc_raw = std.mem.trim(u8, documentation.items, "\r\n");
-    const doc_owned = try allocator.dupe(u8, doc_raw);
+    const doc_owned = try normalizeDocumentationWhitespace(allocator, doc_raw);
     documentation.deinit(allocator);
 
     return .{
