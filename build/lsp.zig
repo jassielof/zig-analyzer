@@ -13,7 +13,7 @@ pub fn runCodegen(b: *std.Build) std.Build.LazyPath {
     const codegen_exe = b.addExecutable(.{
         .name = "lsp-codegen",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("lib/lsp/codegen/codegen.zig"),
+            .root_source_file = b.path("tools/lsp_types_gen/main.zig"),
             .target = b.graph.host,
             .single_threaded = true,
         }),

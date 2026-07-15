@@ -1,5 +1,4 @@
 //! This program is executed from the build system to generate type bindings for the LSP specification.
-// TODO: This should also be moved to /tools/lsp_types_gen/main.zig
 const std = @import("std");
 const MetaModel = @import("MetaModel.zig");
 
