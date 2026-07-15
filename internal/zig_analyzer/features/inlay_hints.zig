@@ -497,7 +497,7 @@ fn writeNodeInlayHint(
 
             if (params.len == 0) return;
 
-            if (data.builtins.get(name)) |builtin| {
+            if (data.get(name)) |builtin| {
                 try writeBuiltinHint(builder, params, builtin.parameters);
             }
         },

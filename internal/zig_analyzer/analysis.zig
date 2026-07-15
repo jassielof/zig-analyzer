@@ -24,7 +24,6 @@ pub const Declaration = DocumentScope.Declaration;
 pub const Scope = DocumentScope.Scope;
 
 const version_data = @import("version_data");
-const build_options = @import("build_options");
 
 const Analyser = @This();
 
@@ -415,14 +414,27 @@ pub fn renderBuiltinFunctionSignature(
     return signature.items;
 }
 
-/// Builtin functions are documented on the online Zig Language Reference instead of embedding
-/// (and having to keep up to date) the prose documentation from `langref.html.in`.
-pub fn renderBuiltinFunctionDocumentationLink(arena: std.mem.Allocator, name: []const u8) error{OutOfMemory}![]u8 {
-    return std.fmt.allocPrint(arena, "See [`{s}()`](https://ziglang.org/documentation/{s}/#{s}) in the _Language Reference_.", .{
-        name,
-        build_options.zig_docs_version,
-        std.mem.trimStart(u8, name, "@"),
-    });
+/// Renders a builtin function's documentation markdown, appending any examples
+/// as fenced Zig code blocks.
+pub fn renderBuiltinDocumentation(
+    arena: std.mem.Allocator,
+    builtin_data: version_data.Builtin,
+) error{OutOfMemory}![]u8 {
+    if (builtin_data.examples.len == 0) {
+        return try arena.dupe(u8, builtin_data.documentation);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, builtin_data.documentation);
+    for (builtin_data.examples) |example| {
+        if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') {
+            try out.append(arena, '\n');
+        }
+        try out.appendSlice(arena, "\n```zig\n");
+        try out.appendSlice(arena, example);
+        try out.appendSlice(arena, "\n```\n");
+    }
+    return out.items;
 }
 
 pub fn isInstanceCall(
@@ -2468,7 +2480,7 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, options: ResolveOptions) Error
                     return Type.fromIP(analyser, .type_type, vector_ty_ip_index);
                 },
                 else => {
-                    const data = version_data.builtins.get(call_name) orelse return null;
+                    const data = version_data.get(call_name) orelse return null;
                     return analyser.resolveLangrefType(data.return_type);
                 },
             }
@@ -6740,7 +6752,7 @@ pub fn resolveExpressionTypeFromAncestors(
                 return try ty.instanceTypeVal(analyser);
             }
 
-            if (version_data.builtins.get(call_name)) |data| {
+            if (version_data.get(call_name)) |data| {
                 const index = std.mem.findScalar(Ast.Node.Index, params, node) orelse return null;
                 if (index >= data.parameters.len) return null;
                 const parameter = data.parameters[index];

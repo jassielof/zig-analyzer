@@ -194,7 +194,7 @@ pub fn getSignatureInfo(
                 const expr_last_token = curr_token - 1;
                 if (tree.tokenTag(expr_last_token) == .builtin) {
                     const builtin_name = tree.tokenSlice(expr_last_token);
-                    const builtin = data.builtins.get(builtin_name) orelse return null;
+                    const builtin = data.get(builtin_name) orelse return null;
 
                     const param_infos = try arena.alloc(types.SignatureHelp.Signature.Parameter, builtin.parameters.len);
                     for (param_infos, builtin.parameters) |*info, parameter| {
@@ -212,7 +212,7 @@ pub fn getSignatureInfo(
                         ),
                         .documentation = .{ .markup_content = .{
                             .kind = markup_kind,
-                            .value = try Analyser.renderBuiltinFunctionDocumentationLink(arena, builtin_name),
+                            .value = try Analyser.renderBuiltinDocumentation(arena, builtin),
                         } },
                         .parameters = param_infos,
                         .activeParameter = paren_commas,

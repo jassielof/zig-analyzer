@@ -630,8 +630,8 @@ fn completeBuiltin(builder: *Builder) error{OutOfMemory}!void {
 
     const insert_range, const replace_range, const new_text_format = prepareFunctionCompletion(builder);
 
-    try builder.completions.ensureUnusedCapacity(builder.arena, version_data.builtins.kvs.len);
-    for (version_data.builtins.keys(), version_data.builtins.values()) |name, builtin| {
+    try builder.completions.ensureUnusedCapacity(builder.arena, version_data.builtins().count());
+    for (version_data.builtins().keys(), version_data.builtins().values()) |name, builtin| {
         const new_text = switch (new_text_format) {
             .only_name => name,
             .snippet => snippet: {
@@ -673,7 +673,7 @@ fn completeBuiltin(builder: *Builder) error{OutOfMemory}!void {
             .documentation = .{
                 .markup_content = .{
                     .kind = if (builder.server.client_capabilities.completion_doc_supports_md) .markdown else .plaintext,
-                    .value = try Analyser.renderBuiltinFunctionDocumentationLink(builder.arena, name),
+                    .value = try Analyser.renderBuiltinDocumentation(builder.arena, builtin),
                 },
             },
         });
@@ -1672,7 +1672,7 @@ fn resolveBuiltinFnArg(
     /// Includes leading `@`
     name: []const u8,
 ) Analyser.Error!?Analyser.Type {
-    const builtin = version_data.builtins.get(name) orelse return null;
+    const builtin = version_data.get(name) orelse return null;
     if (arg_index >= builtin.parameters.len) return null;
     const param = builtin.parameters[arg_index];
     const colon_index = std.mem.findScalar(u8, param.signature, ':') orelse return null;

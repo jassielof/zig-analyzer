@@ -243,21 +243,21 @@ fn hoverDefinitionBuiltin(
         }
     }
 
-    const builtin = data.builtins.get(name) orelse return null;
+    const builtin = data.get(name) orelse return null;
     const signature = try Analyser.renderBuiltinFunctionSignature(
         arena,
         name,
         builtin,
         builtin.parameters.len > 3,
     );
-    const documentation_link = try Analyser.renderBuiltinFunctionDocumentationLink(arena, name);
+    const documentation = try Analyser.renderBuiltinDocumentation(arena, builtin);
 
     switch (markup_kind) {
         .plaintext, .unknown_value => {
             try contents.print(arena,
                 \\{s}
                 \\{s}
-            , .{ signature, documentation_link });
+            , .{ signature, documentation });
         },
         .markdown => {
             try contents.print(arena,
@@ -265,7 +265,7 @@ fn hoverDefinitionBuiltin(
                 \\{s}
                 \\```
                 \\{s}
-            , .{ signature, documentation_link });
+            , .{ signature, documentation });
         },
     }
 
