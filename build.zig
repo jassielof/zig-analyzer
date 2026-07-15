@@ -22,7 +22,6 @@ pub fn build(b: *std.Build) !void {
         build_options.addOption(std.SemanticVersion, "version", resolved_version);
         build_options.addOption([]const u8, "version_string", b.fmt("{f}", .{resolved_version}));
         build_options.addOption([]const u8, "minimum_runtime_zig_version_string", builtin.zig_version_string);
-        build_options.addOption([]const u8, "zig_docs_version", @import("build.zig.zon").minimum_zig_version);
 
         break :blk build_options.createModule();
     };
@@ -46,15 +45,36 @@ pub fn build(b: *std.Build) !void {
     });
 
     const version_data_module = blk: {
-        const gen_version_data_cmd = b.addRunArtifact(gen_exe);
+        const gen_builtins_cmd = b.addRunArtifact(gen_exe);
 
-        gen_version_data_cmd.addArg("--langref-path");
-        gen_version_data_cmd.addFileArg(b.path("tools/config_gen/langref.html.in"));
+        gen_builtins_cmd.addArg("--langref-path");
+        gen_builtins_cmd.addFileArg(b.path("tools/config_gen/langref.md"));
 
-        gen_version_data_cmd.addArg("--generate-version-data");
-        const version_data_path = gen_version_data_cmd.addOutputFileArg("version_data.zig");
+        gen_builtins_cmd.addArg("--generate-builtins-json");
+        const builtins_json_path = gen_builtins_cmd.addOutputFileArg("builtins.json");
 
-        break :blk b.createModule(.{ .root_source_file = version_data_path });
+        // Place builtins.json next to a tiny Zig wrapper so `@embedFile` resolves
+        // relative to that generated source (more reliable than `--embed-dir` alone).
+        const wf = b.addWriteFiles();
+        _ = wf.addCopyFile(builtins_json_path, "builtins.json");
+        const embed_src = wf.add(
+            "builtins_embed.zig",
+            \\//! DO NOT EDIT
+            \\pub const json: []const u8 = @embedFile("builtins.json");
+            \\
+            ,
+        );
+
+        const module = b.createModule(.{
+            .root_source_file = b.path("internal/zig_analyzer/version_data.zig"),
+            .imports = &.{
+                .{
+                    .name = "builtins_embed",
+                    .module = b.createModule(.{ .root_source_file = embed_src }),
+                },
+            },
+        });
+        break :blk module;
     };
 
     { // zig build gen

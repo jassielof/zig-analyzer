@@ -2,9 +2,10 @@
 //!
 //! - generate `internal/zig_analyzer/Config.zig`
 //! - generate `schema.json`
-//! - generate metadata about Zig's builtins (uses `tools/config_gen/langref.html.in`)
+//! - generate metadata about Zig's builtins (uses `tools/config_gen/langref.md`)
 //! - generate ZLS configuration options for vscode-zig's package.json
 const std = @import("std");
+const builtin_serializer = @import("builtin_serializer.zig");
 
 const ConfigOption = struct {
     /// Name of config option
@@ -318,385 +319,6 @@ fn snakeCaseToCamelCase(allocator: std.mem.Allocator, str: []const u8) error{Out
     return result;
 }
 
-/// Tokenizer for a langref.html.in file
-/// example file: https://raw.githubusercontent.com/ziglang/zig/master/doc/langref.html.in
-/// this is a modified version from https://github.com/ziglang/zig/blob/master/doc/docgen.zig
-const Tokenizer = struct {
-    buffer: []const u8,
-    index: usize = 0,
-    state: State = .Start,
-
-    const State = enum {
-        Start,
-        LBracket,
-        Hash,
-        TagName,
-        Eof,
-    };
-
-    const Token = struct {
-        id: Id,
-        start: usize,
-        end: usize,
-
-        const Id = enum {
-            Invalid,
-            Content,
-            BracketOpen,
-            TagContent,
-            Separator,
-            BracketClose,
-            Eof,
-        };
-    };
-
-    fn next(self: *Tokenizer) Token {
-        var result: Token = .{
-            .id = .Eof,
-            .start = self.index,
-            .end = undefined,
-        };
-        while (self.index < self.buffer.len) : (self.index += 1) {
-            const c = self.buffer[self.index];
-            switch (self.state) {
-                .Start => switch (c) {
-                    '{' => {
-                        self.state = .LBracket;
-                    },
-                    else => {
-                        result.id = .Content;
-                    },
-                },
-                .LBracket => switch (c) {
-                    '#' => {
-                        if (result.id != .Eof) {
-                            self.index -= 1;
-                            self.state = .Start;
-                            break;
-                        } else {
-                            result.id = .BracketOpen;
-                            self.index += 1;
-                            self.state = .TagName;
-                            break;
-                        }
-                    },
-                    else => {
-                        result.id = .Content;
-                        self.state = .Start;
-                    },
-                },
-                .TagName => switch (c) {
-                    '|' => {
-                        if (result.id != .Eof) {
-                            break;
-                        } else {
-                            result.id = .Separator;
-                            self.index += 1;
-                            break;
-                        }
-                    },
-                    '#' => {
-                        self.state = .Hash;
-                    },
-                    else => {
-                        result.id = .TagContent;
-                    },
-                },
-                .Hash => switch (c) {
-                    '}' => {
-                        if (result.id != .Eof) {
-                            self.index -= 1;
-                            self.state = .TagName;
-                            break;
-                        } else {
-                            result.id = .BracketClose;
-                            self.index += 1;
-                            self.state = .Start;
-                            break;
-                        }
-                    },
-                    else => {
-                        result.id = .TagContent;
-                        self.state = .TagName;
-                    },
-                },
-                .Eof => unreachable,
-            }
-        } else {
-            switch (self.state) {
-                .Start,
-                .LBracket,
-                .Eof,
-                => {},
-                else => {
-                    result.id = .Invalid;
-                },
-            }
-            self.state = .Eof;
-        }
-        result.end = self.index;
-        return result;
-    }
-};
-
-const Builtin = struct {
-    name: []const u8,
-    signature: []const u8,
-};
-
-/// Parses a `langref.html.in` file and extracts the name and signature of every builtin
-/// function documented in this section: `https://ziglang.org/documentation/master/#Builtin-Functions`
-///
-/// The prose documentation for each builtin is intentionally not collected here; hover/completion
-/// documentation is instead a generated link to the online Language Reference (see `TODO.md`).
-fn collectBuiltinData(allocator: std.mem.Allocator, langref_file: []const u8) error{OutOfMemory}![]Builtin {
-    var tokenizer: Tokenizer = .{ .buffer = langref_file };
-
-    const State = enum {
-        /// searching for this line:
-        /// {#header_open|Builtin Functions|2col#}
-        searching,
-        /// skippig builtin functions description:
-        /// Builtin functions are provided by the compiler and are prefixed ...
-        prefix,
-        /// every entry begins with this:
-        /// {#syntax#}@addrSpaceCast(comptime addrspace: std.builtin.AddressSpace, ptr: anytype) anytype{#endsyntax#}
-        builtin_begin,
-        /// skipping over documentation prose until the next builtin or the end of the section
-        builtin_content,
-    };
-    var state: State = .searching;
-
-    var builtins: std.ArrayList(Builtin) = .empty;
-    errdefer builtins.deinit(allocator);
-
-    var depth: u32 = undefined;
-    while (true) {
-        const token = tokenizer.next();
-        switch (token.id) {
-            .Content => continue,
-            .BracketOpen => {
-                const tag_token = tokenizer.next();
-                std.debug.assert(tag_token.id == .TagContent);
-                const tag_name = tokenizer.buffer[tag_token.start..tag_token.end];
-
-                if (std.mem.eql(u8, tag_name, "header_open")) {
-                    std.debug.assert(tokenizer.next().id == .Separator);
-                    const content_token = tokenizer.next();
-                    std.debug.assert(tag_token.id == .TagContent);
-                    const content_name = tokenizer.buffer[content_token.start..content_token.end];
-
-                    switch (state) {
-                        .searching => {
-                            if (std.mem.eql(u8, content_name, "Builtin Functions")) {
-                                state = .prefix;
-                                depth = 0;
-                            }
-                        },
-                        .prefix, .builtin_begin => {
-                            state = .builtin_begin;
-                            try builtins.append(allocator, .{
-                                .name = content_name,
-                                .signature = "",
-                            });
-                        },
-                        .builtin_content => unreachable,
-                    }
-                    if (state != .searching) {
-                        depth += 1;
-                    }
-
-                    while (true) {
-                        const bracket_tok = tokenizer.next();
-                        switch (bracket_tok.id) {
-                            .BracketClose => break,
-                            .Separator, .TagContent => continue,
-                            else => unreachable,
-                        }
-                    }
-                } else if (std.mem.eql(u8, tag_name, "header_close")) {
-                    std.debug.assert(tokenizer.next().id == .BracketClose);
-
-                    if (state == .builtin_content) {
-                        state = .builtin_begin;
-                    }
-                    if (state != .searching) {
-                        depth -= 1;
-                        if (depth == 0) break;
-                    }
-                } else if (state == .builtin_begin and std.mem.eql(u8, tag_name, "syntax")) {
-                    std.debug.assert(tokenizer.next().id == .BracketClose);
-                    const content_tag = tokenizer.next();
-                    std.debug.assert(content_tag.id == .Content);
-                    const content_name = tokenizer.buffer[content_tag.start..content_tag.end];
-                    std.debug.assert(tokenizer.next().id == .BracketOpen);
-                    const end_syntax_tag = tokenizer.next();
-                    std.debug.assert(end_syntax_tag.id == .TagContent);
-                    const end_tag_name = tokenizer.buffer[end_syntax_tag.start..end_syntax_tag.end];
-                    std.debug.assert(std.mem.eql(u8, end_tag_name, "endsyntax"));
-                    std.debug.assert(tokenizer.next().id == .BracketClose);
-
-                    builtins.items[builtins.items.len - 1].signature = content_name;
-                    state = .builtin_content;
-                } else {
-                    while (true) {
-                        switch (tokenizer.next().id) {
-                            .Eof => unreachable,
-                            .BracketClose => break,
-                            else => continue,
-                        }
-                    }
-                }
-            },
-            else => unreachable,
-        }
-    }
-
-    return try builtins.toOwnedSlice(allocator);
-}
-
-const Parameter = struct {
-    signature: []const u8,
-};
-
-/// takes in a signature (without name or leading parenthesis) like this:
-/// `comptime DestType: type, integer: anytype) DestType`
-/// and outputs its parameters and return type:
-/// `comptime DestType: type`, `integer: anytype`, `DestType`
-fn extractParametersAndReturnTypeFromSignature(allocator: std.mem.Allocator, signature: [:0]const u8) error{OutOfMemory}!struct { []Parameter, []const u8 } {
-    var parameters: std.ArrayList(Parameter) = .empty;
-    errdefer parameters.deinit(allocator);
-
-    var tokenizer: std.zig.Tokenizer = .init(signature);
-    var argument_start: ?usize = null;
-    while (true) {
-        const token = tokenizer.next();
-        switch (token.tag) {
-            .eof => unreachable,
-            .l_paren => {
-                var paren_depth: usize = 1;
-                while (paren_depth > 0) {
-                    switch (tokenizer.next().tag) {
-                        .l_paren => paren_depth += 1,
-                        .r_paren => paren_depth -= 1,
-                        else => {},
-                    }
-                }
-                continue;
-            },
-            .comma, .r_paren => |tag| {
-                if (argument_start) |start| {
-                    try parameters.append(allocator, .{
-                        .signature = std.mem.trim(u8, signature[start..token.loc.start], &std.ascii.whitespace),
-                    });
-                }
-                argument_start = null;
-                if (tag == .r_paren) break;
-            },
-            else => {
-                if (argument_start == null) {
-                    argument_start = token.loc.start;
-                }
-            },
-        }
-    }
-
-    const return_type = signature[tokenizer.index + 1 ..];
-    return .{ try parameters.toOwnedSlice(allocator), return_type };
-}
-
-/// Generates a data file describing the name, parameters, and return type of every builtin
-/// function documented in the Zig Language Reference (https://ziglang.org/documentation/master/).
-///
-/// Prose documentation is deliberately not embedded here: hover/completion/signature-help
-/// documentation for builtins is rendered as a link to the online Language Reference instead
-/// (see `Analyser.renderBuiltinFunctionDocumentationLink`).
-fn generateVersionDataFile(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    output_path: []const u8,
-    langref_path: []const u8,
-) !void {
-    const langref_source = try std.Io.Dir.cwd().readFileAlloc(io, langref_path, allocator, .limited(16 * 1024 * 1024));
-    defer allocator.free(langref_source);
-
-    const builtins = try collectBuiltinData(allocator, langref_source);
-    defer allocator.free(builtins);
-
-    var builtin_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
-    defer builtin_file.close(io);
-
-    var buffer: [4096]u8 = undefined;
-    var file_writer = builtin_file.writer(io, &buffer);
-    const writer = &file_writer.interface;
-
-    try writer.writeAll(
-        \\//! DO NOT EDIT
-        \\//! GENERATED BY tools/config_gen/main.zig
-        \\
-        \\const std = @import("std");
-        \\
-        \\pub const Builtin = struct {
-        \\    return_type: []const u8,
-        \\    parameters: []const Parameter,
-        \\
-        \\    pub const Parameter = struct {
-        \\        signature: []const u8,
-        \\    };
-        \\};
-        \\
-        \\pub const builtins: std.StaticStringMap(Builtin) = .initComptime(&[_]struct { []const u8, Builtin }{
-        \\
-    );
-
-    for (builtins) |builtin| {
-        const signature0 = builtin.signature[builtin.name.len + 1 ..];
-        const signature1 = try std.mem.replaceOwned(u8, allocator, signature0, "std.builtin.", "");
-        defer allocator.free(signature1);
-        const signature2 = try std.mem.replaceOwned(u8, allocator, signature1, "builtin.", "");
-        defer allocator.free(signature2);
-        const signature_with_sentinel = try allocator.dupeSentinel(u8, signature2, 0);
-        defer allocator.free(signature_with_sentinel);
-
-        const parameters, const return_type = try extractParametersAndReturnTypeFromSignature(allocator, signature_with_sentinel);
-        defer allocator.free(parameters);
-
-        try writer.print(
-            \\    .{{
-            \\        "{f}",
-            \\        .{{
-            \\            .return_type = "{f}",
-            \\            .parameters = &.{{
-            \\
-        , .{
-            std.zig.fmtString(builtin.name),
-            std.zig.fmtString(return_type),
-        });
-
-        for (parameters) |param| {
-            try writer.print(
-                \\                .{{ .signature = "{f}" }},
-                \\
-            , .{std.zig.fmtString(param.signature)});
-        }
-
-        try writer.writeAll(
-            \\            },
-            \\        },
-            \\    },
-            \\
-        );
-    }
-
-    try writer.writeAll(
-        \\});
-        \\
-        \\// DO NOT EDIT
-        \\
-    );
-    try file_writer.end();
-}
-
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
@@ -712,7 +334,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var config_path: ?[]const u8 = null;
     var schema_path: ?[]const u8 = null;
     var vscode_config_path: ?[]const u8 = null;
-    var version_data_path: ?[]const u8 = null;
+    var builtins_json_path: ?[]const u8 = null;
     var langref_path: ?[]const u8 = null;
 
     while (args_it.next()) |argname| {
@@ -721,12 +343,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\Usage: zig build gen -- [command]
                 \\
                 \\Commands:
-                \\  --help                           Prints this message
-                \\  --generate-vscode-config [path]  Output zls-vscode configurations
-                \\  --generate-config [path]         Output path to config file (see internal/zig_analyzer/Config.zig)
-                \\  --generate-schema [path]         Output json schema file (see schema.json)
-                \\  --generate-version-data [path]   Output data file
-                \\  --langref-path [path]            Input langref.html.in file path
+                \\  --help                             Prints this message
+                \\  --generate-vscode-config [path]    Output zls-vscode configurations
+                \\  --generate-config [path]           Output path to config file (see internal/zig_analyzer/Config.zig)
+                \\  --generate-schema [path]           Output json schema file (see schema.json)
+                \\  --generate-builtins-json [path]    Output builtins JSON (see tools/config_gen/langref.md)
+                \\  --langref-path [path]              Input langref.md file path
                 \\
             );
             return std.process.cleanExit(io);
@@ -742,13 +364,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
             vscode_config_path = args_it.next() orelse {
                 std.process.fatal("Expected output path after --generate-vscode-config argument.\n", .{});
             };
-        } else if (std.mem.eql(u8, argname, "--generate-version-data")) {
-            version_data_path = args_it.next() orelse {
-                std.process.fatal("Expected output path after --generate-version-data argument.\n", .{});
+        } else if (std.mem.eql(u8, argname, "--generate-builtins-json")) {
+            builtins_json_path = args_it.next() orelse {
+                std.process.fatal("Expected output path after --generate-builtins-json argument.\n", .{});
             };
         } else if (std.mem.eql(u8, argname, "--langref-path")) {
             langref_path = args_it.next() orelse {
-                std.process.fatal("Expected output path after --langref-path argument.\n", .{});
+                std.process.fatal("Expected input path after --langref-path argument.\n", .{});
             };
         } else {
             std.process.fatal("Unrecognized argument '{s}'.\n", .{argname});
@@ -773,12 +395,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
             \\
         );
     }
-    if (version_data_path) |output_path| {
-        try generateVersionDataFile(
+    if (builtins_json_path) |output_path| {
+        try builtin_serializer.generateBuiltinsJson(
             io,
             gpa,
             output_path,
-            langref_path orelse std.process.fatal("--generate-version-data requires --langref-path to be specified", .{}),
+            langref_path orelse std.process.fatal("--generate-builtins-json requires --langref-path to be specified", .{}),
         );
     }
 }
