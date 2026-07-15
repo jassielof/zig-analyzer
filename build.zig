@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) !void {
     const gen_exe = b.addExecutable(.{
         .name = "zig_analyzer_gen",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("internal/zig_analyzer/tools/config_gen.zig"),
+            .root_source_file = b.path("tools/config_gen/main.zig"),
             .target = b.graph.host,
             .single_threaded = true,
         }),
@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) !void {
         const gen_version_data_cmd = b.addRunArtifact(gen_exe);
 
         gen_version_data_cmd.addArg("--langref-path");
-        gen_version_data_cmd.addFileArg(b.path("internal/zig_analyzer/tools/langref.html.in"));
+        gen_version_data_cmd.addFileArg(b.path("tools/config_gen/langref.html.in"));
 
         gen_version_data_cmd.addArg("--generate-version-data");
         const version_data_path = gen_version_data_cmd.addOutputFileArg("version_data.zig");

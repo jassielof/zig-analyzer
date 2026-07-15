@@ -20,6 +20,7 @@
         "internal",
         "lib",
         "schemas",
+        "tools",
         "LICENSE.txt",
         "README.adoc",
     },
