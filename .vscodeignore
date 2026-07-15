@@ -31,3 +31,7 @@ references/
 zig-out/
 *.zig-cache/
 zig-pkg/
+
+# Python
+pyproject.toml
+uv.lock
