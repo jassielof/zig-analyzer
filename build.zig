@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // TODO: Remove use_llvm, wherever the const is used, just skip it to assume the default value.
     const use_llvm: ?bool = null;
 
     const resolved_version = version_build.getVersion(b, package_version);
