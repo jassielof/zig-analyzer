@@ -6,7 +6,6 @@ const Ast = std.zig.Ast;
 const ast = @import("../ast.zig");
 const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
-const tracy = @import("tracy");
 
 const FoldingRange = struct {
     loc: offsets.Loc,
@@ -110,9 +109,6 @@ const Builder = struct {
     }
 
     fn getRanges(builder: Builder) error{OutOfMemory}![]types.FoldingRange {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const result_ranges = try builder.allocator.alloc(types.Range, builder.locations.items.len);
         errdefer builder.allocator.free(result_ranges);
 

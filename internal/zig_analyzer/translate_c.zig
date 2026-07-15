@@ -4,7 +4,6 @@ const std = @import("std");
 const zig_builtin = @import("builtin");
 const DocumentStore = @import("DocumentStore.zig");
 const ast = @import("ast.zig");
-const tracy = @import("tracy");
 const Ast = std.zig.Ast;
 const Uri = @import("Uri.zig");
 const log = std.log.scoped(.translate_c);
@@ -29,9 +28,6 @@ const InMessage = std.zig.Server.Message;
 /// #include "GLFW/glfw3.h"
 /// ```
 pub fn convertCInclude(allocator: std.mem.Allocator, tree: *const Ast, node: Ast.Node.Index) error{ OutOfMemory, Unsupported }![]const u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     std.debug.assert(ast.isBuiltinCall(tree, node));
     std.debug.assert(std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@cImport"));
 
@@ -114,9 +110,6 @@ pub fn translate(
     c_macros: []const []const u8,
     source: []const u8,
 ) !?Result {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const zig_exe_path = config.zig_exe_path.?;
     const zig_lib_dir = config.zig_lib_dir.?;
     const global_cache_dir = config.global_cache_dir.?;

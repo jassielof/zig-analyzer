@@ -11,11 +11,6 @@
             .url = "https://github.com/ziglibs/known-folders/archive/d6d03830968cca6b7b9f24fd97ee348346a6905d.tar.gz",
             .hash = "known_folders-0.0.0-Fy-PJk3KAACzUg2us_0JvQQmod1ZA8jBt7MuoKCihq88",
         },
-        .tracy = .{
-            .url = "https://github.com/wolfpld/tracy/archive/refs/tags/v0.13.1.tar.gz",
-            .hash = "N-V-__8AAOncKwEm1F9c5LrT7HMNmRMYX8-fAoqpc6YyTu9X",
-            .lazy = true,
-        },
     },
     .paths = .{
         "build.zig",

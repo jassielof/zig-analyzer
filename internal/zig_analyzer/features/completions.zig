@@ -10,7 +10,6 @@ const types = @import("lsp").types;
 const Analyser = @import("../analysis.zig");
 const ast = @import("../ast.zig");
 const offsets = @import("../offsets.zig");
-const tracy = @import("tracy");
 const Uri = @import("../Uri.zig");
 const DocumentScope = @import("../DocumentScope.zig");
 const analyser_completions = @import("../analyser/completions.zig");
@@ -101,9 +100,6 @@ pub const Completions = struct {
 };
 
 fn typeToCompletion(builder: *Builder, ty: Analyser.Type) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     try builder.completions.ensureUnusedCapacity(builder.arena, 2);
 
     switch (ty.data) {
@@ -496,9 +492,6 @@ fn labelDeclToCompletion(builder: *Builder, decl_handle: Analyser.DeclWithHandle
 }
 
 fn completeLabel(builder: *Builder) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     try Analyser.iterateLabels(builder.orig_handle, builder.source_index, labelDeclToCompletion, builder);
 }
 
@@ -632,9 +625,6 @@ fn prepareFunctionCompletion(builder: *Builder) PrepareFunctionCompletionResult 
 }
 
 fn completeBuiltin(builder: *Builder) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const config = &builder.server.config_manager.config;
     const use_placeholders = builder.use_snippets and config.enable_argument_placeholders;
 
@@ -691,9 +681,6 @@ fn completeBuiltin(builder: *Builder) error{OutOfMemory}!void {
 }
 
 fn completeGlobal(builder: *Builder) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var decls: std.ArrayList(Analyser.DeclWithHandle) = .empty;
     try builder.analyser.collectAllSymbolsAtSourceIndex(builder.orig_handle, builder.source_index, &decls);
     for (decls.items) |decl_with_handle| {
@@ -703,9 +690,6 @@ fn completeGlobal(builder: *Builder) Analyser.Error!void {
 }
 
 fn completeFieldAccess(builder: *Builder, loc: offsets.Loc) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const ty = try builder.analyser.getFieldAccessType(builder.orig_handle, builder.source_index, loc) orelse return;
     try typeToCompletion(builder, ty);
 }
@@ -755,9 +739,6 @@ fn generateSortText(allocator: std.mem.Allocator, score: u4, label: []const u8) 
 }
 
 fn collectUsedMembersSet(builder: *Builder, likely: EnumLiteralContext.Likely, dot_token_index: Ast.TokenIndex) error{OutOfMemory}!std.BufSet {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     switch (likely) {
         .struct_field, .switch_case => {},
         else => return .init(builder.arena),
@@ -812,9 +793,6 @@ fn collectUsedMembersSet(builder: *Builder, likely: EnumLiteralContext.Likely, d
 }
 
 fn completeDot(builder: *Builder, loc: offsets.Loc) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &builder.orig_handle.tree;
 
     const dot_token_index = offsets.sourceIndexToTokenIndex(tree, loc.start).pickPreferred(&.{.period}, tree) orelse return;
@@ -830,9 +808,6 @@ fn completeDot(builder: *Builder, loc: offsets.Loc) Analyser.Error!void {
 }
 
 fn completeError(builder: *Builder, loc: offsets.Loc) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &builder.orig_handle.tree;
 
     const err_token_index = offsets.sourceIndexToTokenIndex(tree, loc.start).pickPreferred(&.{.period}, tree) orelse return;
@@ -1634,9 +1609,6 @@ fn collectContainerNodes(
     handle: *DocumentStore.Handle,
     dot_context: EnumLiteralContext,
 ) Analyser.Error![]Analyser.Type {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const gpa = builder.analyser.gpa;
 
     var types_with_handles: Analyser.Type.ArraySet = .empty;

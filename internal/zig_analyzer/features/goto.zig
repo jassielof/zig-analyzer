@@ -12,7 +12,6 @@ const lsp = @import("lsp");
 const types = lsp.types;
 const offsets = @import("../offsets.zig");
 const Uri = @import("../Uri.zig");
-const tracy = @import("tracy");
 
 const Analyser = @import("../analysis.zig");
 const DocumentStore = @import("../DocumentStore.zig");
@@ -30,9 +29,6 @@ fn gotoDefinitionSymbol(
     kind: GotoKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const token_handle = switch (kind) {
         .declaration => try decl_handle.definitionToken(analyser, false),
         .definition => try decl_handle.definitionToken(analyser, true),
@@ -76,9 +72,6 @@ fn gotoDefinitionLabel(
     kind: GotoKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name_loc = offsets.identifierLocFromIndex(&handle.tree, pos_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const decl = (try Analyser.lookupLabel(handle, name, pos_index)) orelse return null;
@@ -92,9 +85,6 @@ fn gotoDefinitionGlobal(
     kind: GotoKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name_token, const name_loc = offsets.identifierTokenAndLocFromIndex(&handle.tree, pos_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const is_escaped_identifier = handle.tree.source[handle.tree.tokenStart(name_token)] == '@';
@@ -115,9 +105,6 @@ fn gotoDefinitionStructInit(
     kind: GotoKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (kind == .declaration) return null;
 
     const token = offsets.sourceIndexToTokenIndex(&handle.tree, source_index).pickPreferred(&.{.period}, &handle.tree) orelse return null;
@@ -142,9 +129,6 @@ fn gotoDefinitionEnumLiteral(
     kind: GotoKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name_token, const name_loc = offsets.identifierTokenAndLocFromIndex(&handle.tree, source_index) orelse {
         return gotoDefinitionStructInit(analyser, handle, source_index, kind, offset_encoding);
     };
@@ -159,9 +143,6 @@ fn gotoDefinitionBuiltin(
     loc: offsets.Loc,
     offset_encoding: offsets.Encoding,
 ) error{OutOfMemory}!?types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &handle.tree;
     const name_loc = offsets.tokenIndexToLoc(tree.source, loc.start);
     const name = offsets.locToSlice(tree.source, name_loc);
@@ -213,9 +194,6 @@ fn gotoDefinitionFieldAccess(
     kind: GotoKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?[]const types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name_token, const name_loc = offsets.identifierTokenAndLocFromIndex(&handle.tree, source_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const held_loc = offsets.locMerge(loc, name_loc);
@@ -240,9 +218,6 @@ fn gotoDefinitionString(
     handle: *DocumentStore.Handle,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?[]const types.Definition.Link {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const io = document_store.io;
 
     const loc = pos_context.stringLiteralContentLoc(handle.tree.source);

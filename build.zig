@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const lsp_build = @import("build/lsp.zig");
-const tracy_build = @import("build/tracy.zig");
 const version_build = @import("build/version.zig");
 const zig_analyzer_build = @import("build/zig_analyzer.zig");
 
@@ -12,7 +11,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    var use_llvm: ?bool = null;
+    const use_llvm: ?bool = null;
 
     const resolved_version = version_build.getVersion(b, package_version);
 
@@ -36,13 +35,6 @@ pub fn build(b: *std.Build) !void {
 
         break :blk exe_options.createModule();
     };
-    const tracy_options, const tracy_enable = blk: {
-        const tracy_opts = tracy_build.createTracyOptions(b);
-        break :blk .{ tracy_opts.module, tracy_opts.enable };
-    };
-    // https://github.com/ziglang/zig/issues/25194
-    if (tracy_enable and use_llvm == null) use_llvm = true;
-
     const gen_exe = b.addExecutable(.{
         .name = "zig_analyzer_gen",
         .root_module = b.createModule(.{
@@ -96,8 +88,6 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .lsp_module = lsp_modules.lsp,
-        .tracy_enable = tracy_enable,
-        .tracy_options = tracy_options,
         .build_options = build_options,
         .version_data = version_data_module,
     });
@@ -115,7 +105,6 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "exe_options", .module = exe_options },
             .{ .name = "known-folders", .module = known_folders_module },
-            .{ .name = "tracy", .module = zig_analyzer_module.import_table.get("tracy").? },
             .{ .name = "zig_analyzer", .module = zig_analyzer_module },
         },
     });

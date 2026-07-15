@@ -15,7 +15,6 @@ const offsets = @import("offsets.zig");
 const Uri = @import("Uri.zig");
 const log = std.log.scoped(.analysis);
 const ast = @import("ast.zig");
-const tracy = @import("tracy");
 const InternPool = @import("analyser/InternPool.zig");
 const ErrorMsg = @import("analyser/error_msg.zig").ErrorMsg;
 const references = @import("features/references.zig");
@@ -665,9 +664,6 @@ pub fn isTypeFunction(tree: *const Ast, func: Ast.full.FnProto) bool {
 /// const other = decl.middle.other;
 ///```
 pub fn resolveVarDeclAlias(analyser: *Analyser, decl: DeclWithHandle) Error!?DeclWithHandle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const initial_node = switch (decl.decl) {
         .ast_node => |node| node,
         else => return null,
@@ -1742,9 +1738,6 @@ fn resolvePeerTypesInternal(analyser: *Analyser, a: Type, b: Type) error{OutOfMe
 }
 
 fn resolveCallsiteReferences(analyser: *Analyser, decl_handle: DeclWithHandle) Error!?Type {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const pay = switch (decl_handle.decl) {
         .function_parameter => |pay| pay,
         else => return null,
@@ -1951,9 +1944,6 @@ fn resolveTypeOfNodeInternal(analyser: *Analyser, options: ResolveOptions) Error
 }
 
 pub fn resolveBindingOfNode(analyser: *Analyser, options: ResolveOptions) Error!?Binding {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     return analyser.resolveBindingOfNodeInternal(options);
 }
 
@@ -5359,9 +5349,6 @@ pub fn getPositionContext(
     /// Should we look beyond the `source_index`? `false` for completions, `true` otherwise (hover, goto, etc.)
     lookahead: bool,
 ) error{OutOfMemory}!PositionContext {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var line_loc = if (lookahead) offsets.lineLocAtIndex(tree.source, source_index) else offsets.lineLocUntilIndex(tree.source, source_index);
 
     if (std.mem.startsWith(u8, std.mem.trimStart(u8, offsets.locToSlice(tree.source, line_loc), " \t"), "//")) return .comment;
@@ -5899,9 +5886,6 @@ pub const DeclWithHandle = struct {
     }
 
     pub fn resolveType(self: DeclWithHandle, analyser: *Analyser) Error!?Type {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const tree = &self.handle.tree;
         var resolved_ty = switch (self.decl) {
             .ast_node => |node| try analyser.resolveTypeOfNodeInternal(.{
@@ -6873,9 +6857,6 @@ pub fn getSymbolEnumLiteral(
     source_index: usize,
     name: []const u8,
 ) Error!?DeclWithHandle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &handle.tree;
     const nodes = try ast.nodesOverlappingIndex(analyser.arena, tree, source_index);
     if (nodes.len == 0) return null;
@@ -6887,9 +6868,6 @@ pub fn resolveStructInitType(
     handle: *DocumentStore.Handle,
     source_index: usize,
 ) Error!?Type {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &handle.tree;
     const nodes = try ast.nodesOverlappingIndex(analyser.arena, tree, source_index);
     if (nodes.len == 0) return null;
@@ -6929,9 +6907,6 @@ pub fn getSymbolFieldAccessesArrayList(
     decls_with_handles: *std.ArrayList(DeclWithHandle),
     property_types: *std.ArrayList(Type),
 ) Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (try analyser.getFieldAccessType(handle, source_index, held_loc)) |ty| {
         const container_handle = try analyser.resolveDerefType(ty) orelse ty;
 

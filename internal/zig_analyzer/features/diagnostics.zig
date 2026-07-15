@@ -14,7 +14,6 @@ const ast = @import("../ast.zig");
 const offsets = @import("../offsets.zig");
 const Uri = @import("../Uri.zig");
 const code_actions = @import("code_actions.zig");
-const tracy = @import("tracy");
 const DiagnosticsCollection = @import("../DiagnosticsCollection.zig");
 
 const Zir = std.zig.Zir;
@@ -23,15 +22,9 @@ pub fn generateDiagnostics(
     server: *Server,
     handle: *DocumentStore.Handle,
 ) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const config = &server.config_manager.config;
 
     if (handle.tree.errors.len == 0) {
-        const tracy_zone2 = tracy.traceNamed(@src(), "ast-check");
-        defer tracy_zone2.end();
-
         var error_bundle = try getAstCheckDiagnostics(server, handle);
         errdefer error_bundle.deinit(server.allocator);
 
@@ -93,9 +86,6 @@ pub fn generateDiagnostics(
 }
 
 fn collectParseDiagnostics(tree: *const Ast, eb: *std.zig.ErrorBundle.Wip) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (tree.errors.len == 0) return;
 
     const allocator = eb.gpa;
@@ -156,9 +146,6 @@ fn collectWarnStyleDiagnostics(
     diagnostics: *std.ArrayList(types.Diagnostic),
     offset_encoding: offsets.Encoding,
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     for (0..tree.nodes.len) |i| {
         const node: Ast.Node.Index = @enumFromInt(i);
         if (ast.isBuiltinCall(tree, node)) {
@@ -249,9 +236,6 @@ fn collectGlobalVarDiagnostics(
     diagnostics: *std.ArrayList(types.Diagnostic),
     offset_encoding: offsets.Encoding,
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     for (tree.rootDecls()) |decl| {
         const decl_tag = tree.nodeTag(decl);
         const decl_main_token = tree.nodeMainToken(decl);
@@ -280,9 +264,6 @@ fn collectGlobalVarDiagnostics(
 
 /// caller owns the returned ErrorBundle
 pub fn getAstCheckDiagnostics(server: *Server, handle: *DocumentStore.Handle) error{ Canceled, OutOfMemory }!std.zig.ErrorBundle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     std.debug.assert(handle.tree.errors.len == 0);
     const config = &server.config_manager.config;
 
@@ -337,9 +318,6 @@ fn getErrorBundleFromAstCheck(
     zig_exe_path: []const u8,
     source: [:0]const u8,
 ) !std.zig.ErrorBundle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     comptime std.debug.assert(std.process.can_spawn);
 
     var process = std.process.spawn(io, .{

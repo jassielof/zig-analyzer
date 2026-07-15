@@ -7,7 +7,6 @@ const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
 const ast = @import("../ast.zig");
 const analysis = @import("../analysis.zig");
-const tracy = @import("tracy");
 
 const Symbol = struct {
     name_token: Ast.TokenIndex,
@@ -242,9 +241,6 @@ fn convertSymbols(
     total_symbol_count: usize,
     encoding: offsets.Encoding,
 ) error{OutOfMemory}![]types.DocumentSymbol {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var symbol_buffer: std.ArrayList(types.DocumentSymbol) = .empty;
     try symbol_buffer.ensureTotalCapacityPrecise(arena, total_symbol_count);
 

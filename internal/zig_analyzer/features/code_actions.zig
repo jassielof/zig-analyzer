@@ -10,7 +10,6 @@ const Analyser = @import("../analysis.zig");
 const ast = @import("../ast.zig");
 const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
-const tracy = @import("tracy");
 
 pub const Builder = struct {
     arena: std.mem.Allocator,
@@ -26,9 +25,6 @@ pub const Builder = struct {
         builder: *Builder,
         error_bundle: std.zig.ErrorBundle,
     ) error{OutOfMemory}!void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         var remove_capture_actions: std.AutoHashMapUnmanaged(types.Range, void) = .empty;
 
         try handleUnorganizedImport(builder);
@@ -85,9 +81,6 @@ pub const Builder = struct {
         builder: *Builder,
         range: types.Range,
     ) error{OutOfMemory}!void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const tree = &builder.handle.tree;
 
         const source_index = offsets.positionToIndex(tree.source, range.start, builder.offset_encoding);
@@ -132,9 +125,6 @@ pub fn generateStringLiteralCodeActions(
     builder: *Builder,
     token: Ast.TokenIndex,
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.refactor)) return;
 
     const tree = &builder.handle.tree;
@@ -175,9 +165,6 @@ pub fn generateMultilineStringCodeActions(
     builder: *Builder,
     token: Ast.TokenIndex,
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.refactor)) return;
 
     const tree = &builder.handle.tree;
@@ -245,8 +232,6 @@ pub fn collectAutoDiscardDiagnostics(
     diagnostics: *std.ArrayList(types.Diagnostic),
     offset_encoding: offsets.Encoding,
 ) error{ Canceled, OutOfMemory }!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
     const tree = &handle.tree;
 
     // search for the following pattern:
@@ -302,9 +287,6 @@ pub fn collectAutoDiscardDiagnostics(
 }
 
 fn handleNonCamelcaseFunction(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.quickfix)) return;
 
     const identifier_name = offsets.locToSlice(builder.handle.tree.source, loc);
@@ -322,9 +304,6 @@ fn handleNonCamelcaseFunction(builder: *Builder, loc: offsets.Loc) error{OutOfMe
 }
 
 fn handleUnusedFunctionParameter(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.@"source.fixAll") and !builder.wantKind(.quickfix)) return;
 
     const tree = &builder.handle.tree;
@@ -387,9 +366,6 @@ fn handleUnusedFunctionParameter(builder: *Builder, loc: offsets.Loc) error{OutO
 }
 
 fn handleUnusedVariableOrConstant(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.@"source.fixAll") and !builder.wantKind(.quickfix)) return;
 
     const tree = &builder.handle.tree;
@@ -436,9 +412,6 @@ fn handleUnusedCapture(
     loc: offsets.Loc,
     remove_capture_actions: *std.AutoHashMapUnmanaged(types.Range, void),
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.@"source.fixAll") and !builder.wantKind(.quickfix)) return;
 
     const tree = &builder.handle.tree;
@@ -529,9 +502,6 @@ fn handleUnusedCapture(
 }
 
 fn handlePointlessDiscard(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.@"source.fixAll") and !builder.wantKind(.quickfix)) return;
 
     const edit_loc = getDiscardLoc(&builder.handle.tree, loc) orelse return;
@@ -553,9 +523,6 @@ fn handlePointlessDiscard(builder: *Builder, loc: offsets.Loc) error{OutOfMemory
 }
 
 fn handleVariableNeverMutated(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.quickfix)) return;
 
     const tree = &builder.handle.tree;
@@ -605,9 +572,6 @@ fn analyzeImportPlacement(tree: *const Ast, imports: []const ImportDecl) ImportP
 }
 
 fn handleUnorganizedImport(builder: *Builder) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!builder.wantKind(.@"source.organizeImports")) return;
 
     const tree = &builder.handle.tree;

@@ -11,7 +11,6 @@ const types = lsp.types;
 const Uri = @import("../Uri.zig");
 const offsets = @import("../offsets.zig");
 const ast = @import("../ast.zig");
-const tracy = @import("tracy");
 
 fn labelReferences(
     allocator: std.mem.Allocator,
@@ -20,9 +19,6 @@ fn labelReferences(
     encoding: offsets.Encoding,
     include_decl: bool,
 ) error{OutOfMemory}!std.ArrayList(types.Location) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &handle.tree;
 
     // Find while / for / block from label -> iterate over children nodes, find break and continues, change their labels if they match.
@@ -85,9 +81,6 @@ const Builder = struct {
     }
 
     fn collectReferences(self: *Builder, handle: *DocumentStore.Handle, node: Ast.Node.Index) Analyser.Error!void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const arena = self.analyser.arena;
         try referenceNode(self, handle, node);
         var walker: ast.Walker = try .init(arena, &handle.tree, node);
@@ -254,9 +247,6 @@ fn symbolReferences(
     /// The file on which the request was initiated.
     current_handle: *DocumentStore.Handle,
 ) Analyser.Error!std.ArrayList(types.Location) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     std.debug.assert(target_symbol.decl != .label); // use `labelReferences` instead
 
     const doc_scope = try target_symbol.handle.getDocumentScope();
@@ -555,9 +545,6 @@ const CallBuilder = struct {
     }
 
     fn collectReferences(self: *CallBuilder, handle: *DocumentStore.Handle, node: Ast.Node.Index) Analyser.Error!void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const arena = self.analyser.arena;
         var walker: ast.Walker = try .init(arena, &handle.tree, node);
         defer walker.deinit(arena);
@@ -623,9 +610,6 @@ pub fn callsiteReferences(
     /// search other files for references
     workspace: bool,
 ) Analyser.Error!std.ArrayList(Analyser.NodeWithHandle) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     std.debug.assert(decl_handle.decl == .ast_node);
 
     var builder: CallBuilder = .{
@@ -681,9 +665,6 @@ pub const GeneralReferencesResponse = union {
 };
 
 pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: GeneralReferencesRequest) Server.Error!?GeneralReferencesResponse {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const uri = Uri.parse(arena, request.uri()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidParams,

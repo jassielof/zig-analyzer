@@ -3,7 +3,6 @@ const zig_builtin = @import("builtin");
 const zls = @import("zig_analyzer");
 const exe_options = @import("exe_options");
 
-const tracy = @import("tracy");
 const known_folders = @import("known-folders");
 
 const log = std.log.scoped(.main);
@@ -374,9 +373,6 @@ fn loadConfiguration(
     server: *zls.Server,
     maybe_config_path: ?[]const u8,
 ) error{ Canceled, OutOfMemory }!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var config_arena: std.heap.ArenaAllocator = .init(allocator);
     defer config_arena.deinit();
     var config: zls.Config = .{};
@@ -530,11 +526,8 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         _ = debug_allocator.deinit();
     };
 
-    var tracy_state = if (tracy.enable_allocation) tracy.tracyAllocator(base_allocator) else {};
-    const inner_allocator: std.mem.Allocator = if (tracy.enable_allocation) tracy_state.allocator() else base_allocator;
-
-    var failing_allocator_state = if (exe_options.enable_failing_allocator) zls.testing.FailingAllocator.init(inner_allocator, exe_options.enable_failing_allocator_likelihood) else {};
-    const allocator: std.mem.Allocator = if (exe_options.enable_failing_allocator) failing_allocator_state.allocator() else inner_allocator;
+    var failing_allocator_state = if (exe_options.enable_failing_allocator) zls.testing.FailingAllocator.init(base_allocator, exe_options.enable_failing_allocator_likelihood) else {};
+    const allocator: std.mem.Allocator = if (exe_options.enable_failing_allocator) failing_allocator_state.allocator() else base_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator, .{
         .environ = init.environ,

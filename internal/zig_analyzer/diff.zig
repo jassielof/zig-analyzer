@@ -3,7 +3,6 @@
 const std = @import("std");
 const types = @import("lsp").types;
 const offsets = @import("offsets.zig");
-const tracy = @import("tracy");
 const Diff = @import("dmp").Diff;
 
 pub fn edits(
@@ -13,9 +12,6 @@ pub fn edits(
     after: []const u8,
     encoding: offsets.Encoding,
 ) error{OutOfMemory}!std.ArrayList(types.TextEdit) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const dmp: Diff = .init(io, allocator);
     var diffs = try dmp.diff(
         before,
@@ -72,9 +68,6 @@ pub fn applyContentChanges(
     content_changes: []const types.TextDocument.ContentChangeEvent,
     encoding: offsets.Encoding,
 ) error{OutOfMemory}![:0]const u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const last_full_text_index, const last_full_text = blk: {
         var i: usize = content_changes.len;
         while (i != 0) {
@@ -118,9 +111,6 @@ pub fn applyTextEdits(
     text_edits: []const types.TextEdit,
     encoding: offsets.Encoding,
 ) error{OutOfMemory}![]const u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const text_edits_sortable = try allocator.dupe(types.TextEdit, text_edits);
     defer allocator.free(text_edits_sortable);
 

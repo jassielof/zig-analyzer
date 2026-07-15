@@ -8,7 +8,6 @@ const DocumentStore = @import("../DocumentStore.zig");
 const Analyser = @import("../analysis.zig");
 const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
-const tracy = @import("tracy");
 const ast = @import("../ast.zig");
 const Config = @import("../Config.zig");
 
@@ -240,9 +239,6 @@ fn writeCallHint(
     /// The function call.
     call: Ast.full.Call,
 ) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const handle = builder.handle;
 
     const ty = try builder.analyser.resolveTypeOfNode(.of(call.ast.fn_expr, handle)) orelse return;
@@ -294,9 +290,6 @@ fn writeCallHint(
 
 /// takes parameter nodes from the ast and function parameter names from `Builtin.parameters` and writes parameter hints into `builder.hints`
 fn writeBuiltinHint(builder: *Builder, parameters: []const Ast.Node.Index, params: []const data.Builtin.Parameter) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const handle = builder.handle;
     const tree = &handle.tree;
 
@@ -373,9 +366,6 @@ fn inferAppendTypeStr(builder: *Builder, token: Ast.TokenIndex) Analyser.Error!v
 }
 
 fn writeForCaptureHint(builder: *Builder, for_node: Ast.Node.Index) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &builder.handle.tree;
     const full_for = ast.fullFor(tree, for_node).?;
     var capture_token = full_for.payload_token;
@@ -393,9 +383,6 @@ fn writeForCaptureHint(builder: *Builder, for_node: Ast.Node.Index) Analyser.Err
 
 /// takes a Ast.full.Call (a function call), analysis its function expression, finds its declaration and writes parameter hints into `builder.hints`
 fn writeCallNodeHint(builder: *Builder, call: Ast.full.Call) Analyser.Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (call.ast.params.len == 0) return;
     if (builder.config.inlay_hints_exclude_single_argument and call.ast.params.len == 1) return;
 

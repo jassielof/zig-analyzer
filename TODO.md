@@ -24,5 +24,4 @@
 - [ ] **Test gutter icons** for test cases. By single projects, each project can be easily filtered and run individually with `zig test --filterflag "test ID"`, but if that test module depends on another module, this zig test breaks, so it's not possible to run that test individually for projects with dependencies. This needs to be marked as FIXME, for a robust workaround once it's possible, specially because for test modules, it's not possible to run a single test case, unless we add an option filter within the build filter, we could suggest the user (throw a warn, etc.)
 - [ ] Build steps from the script should be actionable, as in a code lens for each build step.
 - [ ] For each manifest dependency, if the dependency it's Zig-based or has as zig manfiest (build.zig.zon), the version should be displayed.
-- [ ] Remove Tracy usage, traicing and profiling will be done once the LSP is robust, correct, and stable, in the meantime, no pre-mature optimization will be done.
 

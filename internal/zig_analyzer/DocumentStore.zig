@@ -10,7 +10,6 @@ const lsp = @import("lsp");
 const Ast = std.zig.Ast;
 const BuildAssociatedConfig = @import("BuildAssociatedConfig.zig");
 pub const BuildConfig = @import("build_runner/shared.zig").BuildConfig;
-const tracy = @import("tracy");
 const translate_c = @import("translate_c.zig");
 const DocumentScope = @import("DocumentScope.zig");
 const DiagnosticsCollection = @import("DiagnosticsCollection.zig");
@@ -102,9 +101,6 @@ pub const BuildFile = struct {
         /// Stores the `root_source_file`. Caller owns returned memory.
         yes: []const u8,
     } {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const allocator = store.allocator;
         const io = store.io;
 
@@ -411,9 +407,6 @@ pub const Handle = struct {
         text: [:0]const u8,
         allocator: std.mem.Allocator,
     ) error{OutOfMemory}!void {
-        const tracy_zone = tracy.traceNamed(@src(), "Handle.refresh");
-        defer tracy_zone.end();
-
         const mode: Ast.Mode = if (std.mem.eql(u8, std.Io.Dir.path.extension(handle.uri.raw), ".zon")) .zon else .zig;
         var new_tree = try parseTree(allocator, text, mode);
         errdefer new_tree.deinit(allocator);
@@ -461,9 +454,6 @@ pub const Handle = struct {
     }
 
     fn parseTree(allocator: std.mem.Allocator, new_text: [:0]const u8, mode: Ast.Mode) error{OutOfMemory}!Ast {
-        const tracy_zone = tracy.traceNamed(@src(), "Ast.parse");
-        defer tracy_zone.end();
-
         var tree = try Ast.parse(allocator, new_text, mode);
         errdefer tree.deinit(allocator);
 
@@ -486,9 +476,6 @@ pub const Handle = struct {
         file_imports: *std.ArrayList(Uri),
         cimports: *std.MultiArrayList(CImportHandle),
     ) error{OutOfMemory}!void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         const parsed_uri = uri.toStdUri();
 
         const node_tags = tree.nodes.items(.tag);
@@ -560,9 +547,6 @@ pub const Handle = struct {
     /// Caller must free `Handle.uri` if needed.
     /// Keep in sync with `dead`.
     fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
-        const tracy_zone = tracy.trace(@src());
-        defer tracy_zone.end();
-
         if (self.impl.has_tree_and_source) {
             allocator.free(self.tree.source);
             self.tree.deinit(allocator);
@@ -611,9 +595,6 @@ pub const Handle = struct {
             }
 
             pub fn get(lazy: *LazyResource, handle: *Handle) error{OutOfMemory}!*const T {
-                const tracy_zone = tracy.traceNamed(@src(), "Lazy(" ++ @typeName(T) ++ ").get");
-                defer tracy_zone.end();
-
                 const store = handle.impl.store;
                 const io = store.io;
 
@@ -626,9 +607,6 @@ pub const Handle = struct {
             }
 
             pub fn getOrNull(lazy: *LazyResource, handle: *Handle) ?*const T {
-                const tracy_zone = tracy.traceNamed(@src(), "Lazy(" ++ @typeName(T) ++ ").getOrNull");
-                defer tracy_zone.end();
-
                 const store = handle.impl.store;
                 const io = store.io;
                 handle.impl.lock.lockUncancelable(io);
@@ -738,9 +716,6 @@ const ReadFileError = std.mem.Allocator.Error || std.Io.Cancelable || std.Io.Fil
 
 /// Must satisfy `uri.isFileScheme()`.
 fn readFile(self: *DocumentStore, uri: Uri) ReadFileError![:0]u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const file_path = uri.toFsPath(self.allocator) catch |err| switch (err) {
         error.UnsupportedScheme => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -777,9 +752,6 @@ fn readFile(self: *DocumentStore, uri: Uri) ReadFileError![:0]u8 {
 /// **Thread safe** takes an exclusive lock
 /// This function does not protect against data races from modifying the Handle
 pub fn getOrLoadHandle(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemory }!?*Handle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (!uri.isFileScheme()) return self.getHandle(uri);
     return self.createAndStoreDocument(
         uri,
@@ -838,9 +810,6 @@ fn getOrLoadBuildFile(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemo
 /// Opens a document that is synced over the LSP protocol (`textDocument/didOpen`).
 /// **Not thread safe**
 pub fn openLspSyncedDocument(self: *DocumentStore, uri: Uri, text: []const u8) error{ Canceled, OutOfMemory }!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (self.getHandle(uri)) |handle| {
         if (handle.lsp_synced) {
             log.warn("Document already open: {s}", .{uri.raw});
@@ -865,9 +834,6 @@ pub fn openLspSyncedDocument(self: *DocumentStore, uri: Uri, text: []const u8) e
 /// Closes a document that has been synced over the LSP protocol (`textDocument/didClose`).
 /// **Not thread safe**
 pub fn closeLspSyncedDocument(self: *DocumentStore, uri: Uri) void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const handle_index = self.handles.getIndex(uri) orelse {
         log.warn("Document not found: {s}", .{uri.raw});
         return;
@@ -892,9 +858,6 @@ pub fn closeLspSyncedDocument(self: *DocumentStore, uri: Uri) void {
 /// Takes ownership of `new_text` which has to be allocated with this DocumentStore's allocator.
 /// **Not thread safe**
 pub fn refreshLspSyncedDocument(self: *DocumentStore, uri: Uri, new_text: [:0]const u8) error{ Canceled, OutOfMemory }!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (self.getHandle(uri)) |old_handle| {
         if (!old_handle.lsp_synced) {
             log.warn("Document modified without being opened: {s}", .{uri.raw});
@@ -920,9 +883,6 @@ pub fn refreshLspSyncedDocument(self: *DocumentStore, uri: Uri, new_text: [:0]co
 /// Refreshes a document from the file system, unless said document is synced over the LSP protocol.
 /// **Not thread safe**
 pub fn refreshDocumentFromFileSystem(self: *DocumentStore, uri: Uri, should_delete: bool) error{ Canceled, OutOfMemory }!bool {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (should_delete) {
         const index = self.handles.getIndex(uri) orelse return false;
         const handle_future = self.handles.values()[index];
@@ -972,9 +932,6 @@ pub fn invalidateBuildFile(self: *DocumentStore, build_file_uri: Uri) void {
 const LoadDirectoryError = error{UnsupportedScheme} || std.mem.Allocator.Error || std.Io.Dir.OpenError;
 
 pub fn loadDirectoryRecursive(store: *DocumentStore, directory_uri: Uri) LoadDirectoryError!usize {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const workspace_path = try directory_uri.toFsPath(store.allocator);
     defer store.allocator.free(workspace_path);
 
@@ -1036,9 +993,6 @@ pub fn loadTrigramStores(
     store: *DocumentStore,
     filter_uris: []const std.Uri,
 ) error{ OutOfMemory, Canceled }![]*DocumentStore.Handle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var handles: std.ArrayList(*DocumentStore.Handle) = .empty;
     errdefer handles.deinit(store.allocator);
 
@@ -1190,9 +1144,6 @@ fn notifyBuildEnd(self: *DocumentStore, status: EndStatus) void {
 }
 
 fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.Io.Cancelable!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     {
         try build_file.impl.mutex.lock(self.io);
         defer build_file.impl.mutex.unlock(self.io);
@@ -1300,9 +1251,6 @@ pub fn isInStd(uri: Uri) bool {
 /// looks for a `zls.build.json` file in the build file directory
 /// has to be freed with `json_compat.parseFree`
 fn loadBuildAssociatedConfiguration(io: std.Io, allocator: std.mem.Allocator, build_file: BuildFile) !std.json.Parsed(BuildAssociatedConfig) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const build_file_path = try build_file.uri.toFsPath(allocator);
     defer allocator.free(build_file_path);
     const config_file_path = try std.Io.Dir.path.resolve(allocator, &.{ build_file_path, "..", "zls.build.json" });
@@ -1325,9 +1273,6 @@ fn loadBuildAssociatedConfiguration(io: std.Io, allocator: std.mem.Allocator, bu
 }
 
 fn prepareBuildRunnerArgs(self: *DocumentStore, build_file_uri: Uri) error{OutOfMemory}![][]const u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const base_args = &[_][]const u8{
         self.config.zig_exe_path.?,
         "build",
@@ -1362,9 +1307,6 @@ fn prepareBuildRunnerArgs(self: *DocumentStore, build_file_uri: Uri) error{OutOf
 
 /// Runs the build.zig and extracts include directories and packages
 fn loadBuildConfiguration(self: *DocumentStore, build_file_uri: Uri, build_file_version: u32) !std.json.Parsed(BuildConfig) {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     std.debug.assert(self.config.zig_exe_path != null);
     std.debug.assert(self.config.build_runner_path != null);
     std.debug.assert(self.config.global_cache_dir != null);
@@ -1382,8 +1324,6 @@ fn loadBuildConfiguration(self: *DocumentStore, build_file_uri: Uri, build_file_
     }
 
     const zig_run_result = blk: {
-        const tracy_zone2 = tracy.trace(@src());
-        defer tracy_zone2.end();
         break :blk try std.process.run(
             self.allocator,
             self.io,
@@ -1471,9 +1411,6 @@ fn buildDotZigExists(io: std.Io, dir_path: []const u8) std.Io.Cancelable!bool {
 /// See `Handle.getAssociatedBuildFile`.
 /// Caller owns returned memory.
 fn collectPotentialBuildFiles(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemory }![]*BuildFile {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (isInStd(uri)) return &.{};
 
     var potential_build_files: std.ArrayList(*BuildFile) = .empty;
@@ -1520,9 +1457,6 @@ fn collectPotentialBuildFiles(self: *DocumentStore, uri: Uri) error{ Canceled, O
 }
 
 fn createBuildFile(self: *DocumentStore, uri: Uri) error{ Canceled, OutOfMemory }!BuildFile {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var build_file: BuildFile = .{
         .uri = try uri.dupe(self.allocator),
     };
@@ -1572,9 +1506,6 @@ fn createAndStoreDocument(
     file_source: FileSource,
     options: CreateAndStoreOptions,
 ) ReadFileError!*Handle {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     std.debug.assert(!(options.lsp_synced and !options.override));
     std.debug.assert(!(options.lsp_synced and file_source == .uri));
 
@@ -1695,9 +1626,6 @@ pub fn collectIncludeDirs(
 ) error{ Canceled, OutOfMemory }!bool {
     comptime std.debug.assert(supports_build_system);
 
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var arena_allocator: std.heap.ArenaAllocator = .init(allocator);
     defer arena_allocator.deinit();
 
@@ -1789,9 +1717,6 @@ pub fn collectCMacros(
 /// **Thread safe** takes an exclusive lock
 pub fn resolveCImport(self: *DocumentStore, handle: *Handle, node: Ast.Node.Index) error{ Canceled, OutOfMemory }!?Uri {
     comptime std.debug.assert(supports_build_system);
-
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
 
     if (self.config.zig_exe_path == null) return null;
     if (self.config.zig_lib_dir == null) return null;
@@ -1981,9 +1906,6 @@ pub fn uriFromImportStr(
     handle: *Handle,
     import_str: []const u8,
 ) error{ Canceled, OutOfMemory }!UriFromImportStringResult {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (std.mem.endsWith(u8, import_str, ".zig") or std.mem.endsWith(u8, import_str, ".zon")) {
         const parsed_uri = handle.uri.toStdUri();
         return .{ .one = try Uri.resolveImport(allocator, handle.uri, parsed_uri, import_str) };

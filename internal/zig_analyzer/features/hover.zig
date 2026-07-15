@@ -6,7 +6,6 @@ const Ast = std.zig.Ast;
 const ast = @import("../ast.zig");
 const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
-const tracy = @import("tracy");
 
 const Analyser = @import("../analysis.zig");
 const DocumentStore = @import("../DocumentStore.zig");
@@ -19,9 +18,6 @@ fn hoverSymbol(
     param_decl_handle: Analyser.DeclWithHandle,
     markup_kind: types.MarkupKind,
 ) Analyser.Error!?[]const u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var doc_strings: std.ArrayList([]const u8) = .empty;
 
     var decl_handle: Analyser.DeclWithHandle = param_decl_handle;
@@ -192,9 +188,6 @@ fn hoverDefinitionLabel(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Hover {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name = offsets.locToSlice(handle.tree.source, loc);
     const decl = (try Analyser.lookupLabel(handle, name, pos_index)) orelse return null;
 
@@ -219,9 +212,6 @@ fn hoverDefinitionBuiltin(
     offset_encoding: offsets.Encoding,
 ) error{OutOfMemory}!?types.Hover {
     _ = analyser;
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name = offsets.locToSlice(handle.tree.source, name_loc);
 
     var contents: std.ArrayList(u8) = .empty;
@@ -297,9 +287,6 @@ fn hoverDefinitionGlobal(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Hover {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name_token, const name_loc = offsets.identifierTokenAndLocFromIndex(&handle.tree, pos_index) orelse return null;
     const name = offsets.locToSlice(handle.tree.source, name_loc);
     const hover_text = blk: {
@@ -334,9 +321,6 @@ fn hoverDefinitionStructInit(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Hover {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const token = offsets.sourceIndexToTokenIndex(&handle.tree, source_index).pickPreferred(&.{.period}, &handle.tree) orelse return null;
     if (token + 1 >= handle.tree.tokens.len) return null;
     if (handle.tree.tokenTag(token + 1) != .l_brace) return null;
@@ -373,9 +357,6 @@ fn hoverDefinitionEnumLiteral(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Hover {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const name_token, const name_loc = offsets.identifierTokenAndLocFromIndex(&handle.tree, source_index) orelse {
         return try hoverDefinitionStructInit(analyser, arena, handle, source_index, markup_kind, offset_encoding);
     };
@@ -402,9 +383,6 @@ fn hoverDefinitionFieldAccess(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) Analyser.Error!?types.Hover {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var decls: std.ArrayList(Analyser.DeclWithHandle) = .empty;
     var tys: std.ArrayList(Analyser.Type) = .empty;
     const highlight_loc = try analyser.getSymbolFieldAccessesHighlight(arena, handle, source_index, loc, &decls, &tys) orelse return null;
@@ -491,9 +469,6 @@ fn hoverDefinitionNumberLiteral(
     markup_kind: types.MarkupKind,
     offset_encoding: offsets.Encoding,
 ) error{OutOfMemory}!?types.Hover {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const tree = &handle.tree;
     const token_index = offsets.sourceIndexToTokenIndex(tree, source_index).pickPreferred(&.{ .number_literal, .char_literal }, tree) orelse return null;
     const num_loc = offsets.tokenToLoc(tree, token_index);

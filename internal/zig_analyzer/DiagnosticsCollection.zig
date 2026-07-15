@@ -1,6 +1,5 @@
 const std = @import("std");
 const lsp = @import("lsp");
-const tracy = @import("tracy");
 const offsets = @import("offsets.zig");
 const Uri = @import("Uri.zig");
 
@@ -72,9 +71,6 @@ pub fn pushSingleDocumentDiagnostics(
         error_bundle: std.zig.ErrorBundle,
     },
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     collection.mutex.lockUncancelable(collection.io);
     defer collection.mutex.unlock(collection.io);
 
@@ -124,9 +120,6 @@ pub fn pushErrorBundle(
     src_base_path: ?[]const u8,
     error_bundle: std.zig.ErrorBundle,
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var new_error_bundle: std.zig.ErrorBundle.Wip = undefined;
     try new_error_bundle.init(collection.allocator);
     defer new_error_bundle.deinit();
@@ -186,9 +179,6 @@ pub fn pushErrorBundle(
 }
 
 pub fn clearErrorBundle(collection: *DiagnosticsCollection, tag: Tag) void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     collection.mutex.lockUncancelable(collection.io);
     defer collection.mutex.unlock(collection.io);
 
@@ -212,9 +202,6 @@ pub fn clearErrorBundle(collection: *DiagnosticsCollection, tag: Tag) void {
 }
 
 pub fn clearSingleDocumentDiagnostics(collection: *DiagnosticsCollection, document_uri: Uri) void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     collection.mutex.lockUncancelable(collection.io);
     defer collection.mutex.unlock(collection.io);
 

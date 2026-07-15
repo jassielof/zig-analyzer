@@ -15,7 +15,6 @@ const lsp = @import("lsp");
 const types = lsp.types;
 const Analyser = @import("analysis.zig");
 const offsets = @import("offsets.zig");
-const tracy = @import("tracy");
 const diff = @import("diff.zig");
 const Uri = @import("Uri.zig");
 const InternPool = @import("analyser/analyser.zig").InternPool;
@@ -147,9 +146,6 @@ pub const Status = enum {
 };
 
 fn sendToClientResponse(server: *Server, id: lsp.JsonRPCMessage.ID, result: anytype) error{ Canceled, OutOfMemory }![]u8 {
-    const tracy_zone = tracy.traceNamed(@src(), "sendToClientResponse(" ++ @typeName(@TypeOf(result)) ++ ")");
-    defer tracy_zone.end();
-
     // TODO validate result type is a possible response
     // TODO validate response is from a client to server request
     // TODO validate result type
@@ -162,9 +158,6 @@ fn sendToClientResponse(server: *Server, id: lsp.JsonRPCMessage.ID, result: anyt
 }
 
 fn sendToClientRequest(server: *Server, id: lsp.JsonRPCMessage.ID, method: []const u8, params: anytype) error{ Canceled, OutOfMemory }![]u8 {
-    const tracy_zone = tracy.traceNamed(@src(), "sendToClientRequest(" ++ @typeName(@TypeOf(params)) ++ ")");
-    defer tracy_zone.end();
-
     // TODO validate method is a request
     // TODO validate method is server to client
     // TODO validate params type
@@ -178,9 +171,6 @@ fn sendToClientRequest(server: *Server, id: lsp.JsonRPCMessage.ID, method: []con
 }
 
 fn sendToClientNotification(server: *Server, method: []const u8, params: anytype) error{ Canceled, OutOfMemory }![]u8 {
-    const tracy_zone = tracy.traceNamed(@src(), "sendToClientRequest(" ++ @typeName(@TypeOf(params)) ++ ")");
-    defer tracy_zone.end();
-
     // TODO validate method is a notification
     // TODO validate method is server to client
     // TODO validate params type
@@ -193,9 +183,6 @@ fn sendToClientNotification(server: *Server, method: []const u8, params: anytype
 }
 
 fn sendToClientResponseError(server: *Server, id: lsp.JsonRPCMessage.ID, err: lsp.JsonRPCMessage.Response.Error) error{ Canceled, OutOfMemory }![]u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const response: lsp.JsonRPCMessage = .{
         .response = .{ .id = id, .result_or_error = .{ .@"error" = err } },
     };
@@ -210,9 +197,6 @@ fn sendToClientInternal(io: std.Io, allocator: std.mem.Allocator, transport: ?*l
     errdefer allocator.free(message_stringified);
 
     if (transport) |t| {
-        const tracy_zone = tracy.traceNamed(@src(), "Transport.writeJsonMessage");
-        defer tracy_zone.end();
-
         t.writeJsonMessage(io, message_stringified) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => log.err("failed to write message: {}", .{err}),
@@ -682,9 +666,6 @@ fn requestConfiguration(server: *Server) Error!void {
 
 /// Handle the response of the `workspace/configuration` request.
 fn handleConfiguration(server: *Server, json: std.json.Value) error{ Canceled, OutOfMemory }!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const result: std.json.Value = switch (json) {
         .array => |arr| blk: {
             if (arr.items.len != 1) {
@@ -1685,9 +1666,6 @@ pub const CreateOptions = struct {
 };
 
 pub fn create(options: CreateOptions) std.mem.Allocator.Error!*Server {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const io = options.io;
     const allocator = options.allocator;
 
@@ -1762,8 +1740,6 @@ pub fn loop(server: *Server) LoopError!void {
         errdefer arena_allocator.deinit();
 
         const message = message: {
-            const tracy_zone = tracy.traceNamed(@src(), "Message.parse");
-            defer tracy_zone.end();
             break :message Message.parseFromSliceLeaky(
                 arena_allocator.allocator(),
                 json_message,
@@ -1793,10 +1769,6 @@ pub fn sendJsonMessageSync(server: *Server, json_message: []const u8) Error!?[]u
 
 pub fn sendRequestSync(server: *Server, arena: std.mem.Allocator, comptime method: []const u8, params: lsp.ParamsType(method)) Error!lsp.ResultType(method) {
     comptime std.debug.assert(lsp.isRequestMethod(method));
-    const tracy_zone = tracy.traceNamed(@src(), "sendRequestSync(" ++ method ++ ")");
-    defer tracy_zone.end();
-    tracy_zone.setName(method);
-
     const Params = std.meta.Tag(HandledRequestParams);
     if (!@hasField(Params, method)) return null;
 
@@ -1830,10 +1802,6 @@ pub fn sendRequestSync(server: *Server, arena: std.mem.Allocator, comptime metho
 
 pub fn sendNotificationSync(server: *Server, arena: std.mem.Allocator, comptime method: []const u8, params: lsp.ParamsType(method)) Error!void {
     comptime std.debug.assert(lsp.isNotificationMethod(method));
-    const tracy_zone = tracy.traceNamed(@src(), "sendNotificationSync(" ++ method ++ ")");
-    defer tracy_zone.end();
-    tracy_zone.setName(method);
-
     const Params = std.meta.Tag(HandledNotificationParams);
     if (!@hasField(Params, method)) return null;
 
@@ -1862,9 +1830,6 @@ pub fn sendMessageSync(server: *Server, arena: std.mem.Allocator, comptime metho
 }
 
 fn processMessage(server: *Server, arena: std.mem.Allocator, message: Message) Error!?[]u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     try server.validateMessage(message);
 
     switch (message) {
@@ -1927,9 +1892,6 @@ fn processMessageReportError(server: *Server, arena_state: std.heap.ArenaAllocat
 }
 
 fn validateMessage(server: *const Server, message: Message) Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     const method = switch (message) {
         .request => |request| switch (request.params) {
             .other => |info| info.method,
@@ -1972,9 +1934,6 @@ fn validateMessage(server: *const Server, message: Message) Error!void {
 }
 
 fn handleResponse(server: *Server, response: lsp.JsonRPCMessage.Response) Error!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     if (response.id == null) {
         log.warn("received response from client without id!", .{});
         return;

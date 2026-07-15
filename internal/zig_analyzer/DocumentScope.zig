@@ -3,7 +3,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const Ast = std.zig.Ast;
-const tracy = @import("tracy");
 const offsets = @import("offsets.zig");
 
 const DocumentScope = @This();
@@ -486,9 +485,6 @@ const ScopeContext = struct {
 };
 
 pub fn init(allocator: std.mem.Allocator, tree: *const Ast) error{OutOfMemory}!DocumentScope {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var document_scope: DocumentScope = .{
         .scopes = .empty,
         .declarations = .empty,
@@ -766,9 +762,6 @@ noinline fn walkContainerDecl(
     tree: *const Ast,
     node_idx: Ast.Node.Index,
 ) error{OutOfMemory}!void {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
     var buf: [2]Ast.Node.Index = undefined;
     const container_decl = tree.fullContainerDecl(&buf, node_idx).?;
 
