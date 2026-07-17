@@ -88,19 +88,14 @@ pub fn addLspTests(
     b: *std.Build,
     test_step: *std.Build.Step,
     modules: Modules,
-    use_llvm: ?bool,
 ) void {
     const lsp_tests = b.addTest(.{
         .root_module = modules.lsp,
-        .use_lld = use_llvm,
-        .use_llvm = use_llvm,
     });
 
     const lsp_parser_tests = b.addTest(.{
         .name = "test lsp parser",
         .root_module = modules.parser,
-        .use_lld = use_llvm,
-        .use_llvm = use_llvm,
     });
 
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);

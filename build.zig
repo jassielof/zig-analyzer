@@ -11,9 +11,6 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // TODO: Remove use_llvm, wherever the const is used, just skip it to assume the default value.
-    const use_llvm: ?bool = null;
-
     const resolved_version = version_build.getVersion(b, package_version);
 
     const build_options = blk: {
@@ -142,8 +139,6 @@ pub fn build(b: *std.Build) !void {
         const exe = b.addExecutable(.{
             .name = "zig-analyzer",
             .root_module = exe_module,
-            .use_llvm = use_llvm,
-            .use_lld = use_llvm,
         });
         b.installArtifact(exe);
     }
@@ -164,11 +159,9 @@ pub fn build(b: *std.Build) !void {
         const src_tests = b.addTest(.{
             .name = "zig_analyzer src test",
             .root_module = zig_analyzer_module,
-            .use_llvm = use_llvm,
-            .use_lld = use_llvm,
         });
         test_step.dependOn(&b.addRunArtifact(src_tests).step);
 
-        lsp_build.addLspTests(b, test_step, lsp_modules, use_llvm);
+        lsp_build.addLspTests(b, test_step, lsp_modules);
     }
 }
