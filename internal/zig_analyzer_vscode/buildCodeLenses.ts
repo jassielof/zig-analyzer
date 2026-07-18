@@ -9,12 +9,13 @@ import {
 } from "./buildGraph";
 
 /**
- * Code lenses for Zig build/run:
- * - In `build.zig`: above `fn build` → `zig build`; above each
- *   `b.step("name", …)` → `zig build name`.
+ * Code lenses for Zig run targets (client-side):
  * - Above `fn main`: prefer `zig build <step>` when build.zig wires this
  *   file as an executable root to a named run step; otherwise
  *   `zig run <file>`.
+ *
+ * Build-step lenses inside `build.zig` (`b.step("…")`, `fn build`) come from
+ * the language server (`textDocument/codeLens`) so any LSP client can show them.
  */
 export class ZigBuildCodeLensProvider implements vscode.CodeLensProvider {
   private readonly _onDidChange = new vscode.EventEmitter<void>();
@@ -41,36 +42,11 @@ export class ZigBuildCodeLensProvider implements vscode.CodeLensProvider {
   ): vscode.ProviderResult<vscode.CodeLens[]> {
     if (document.uri.scheme !== "file") return [];
 
-    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
-    const basename = path.basename(document.uri.fsPath);
-    const lenses: vscode.CodeLens[] = [];
+    // `build.zig` step lenses are provided by the language server.
+    if (path.basename(document.uri.fsPath) === "build.zig") return [];
 
-    if (basename === "build.zig") {
-      const info = parseBuildScript(document.getText());
-      if (info.buildFnLine !== null) {
-        lenses.push(
-          lensAt(
-            document,
-            info.buildFnLine,
-            "zig build",
-            "zigAnalyzer.executeBuild",
-            [null, folder?.uri.toString() ?? null],
-          ),
-        );
-      }
-      for (const step of info.steps) {
-        lenses.push(
-          lensAt(
-            document,
-            step.line,
-            `zig build ${step.name}`,
-            "zigAnalyzer.executeBuild",
-            [step.name, folder?.uri.toString() ?? null],
-          ),
-        );
-      }
-      return lenses;
-    }
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    const lenses: vscode.CodeLens[] = [];
 
     const mainLines = findMainFnLines(document.getText());
     if (mainLines.length === 0) return [];

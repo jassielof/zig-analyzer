@@ -90,6 +90,36 @@
             "default": false
         },
         {
+            "name": "enable_formatting",
+            "description": "Whether the language server provides document formatting. When disabled, Format Document is a no-op from the server.",
+            "type": "bool",
+            "default": true
+        },
+        {
+            "name": "formatter_command",
+            "description": "Executable of a stdin/stdout formatter. When unset, the built-in formatter (matching `zig fmt`) is used. The command must read the entire document from stdin and write the fully formatted result to stdout.",
+            "type": "?[]const u8",
+            "default": null
+        },
+        {
+            "name": "formatter_args",
+            "description": "Arguments passed to `formatter_command`. For `zig fmt`, use `[\"fmt\", \"--stdin\"]`. Ignored when `formatter_command` is unset.",
+            "type": "[]const []const u8",
+            "default": []
+        },
+        {
+            "name": "enable_reference_code_lenses",
+            "description": "Show reference counts as code lenses on declarations within the build-graph compilation unit.",
+            "type": "bool",
+            "default": true
+        },
+        {
+            "name": "enable_unused_decl_diagnostics",
+            "description": "Report unused private declarations as faded (Unnecessary) diagnostics. Public declarations are never reported.",
+            "type": "bool",
+            "default": true
+        },
+        {
             "name": "warn_style",
             "description": "Enables warnings for style guideline mismatches",
             "type": "bool",

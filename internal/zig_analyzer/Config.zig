@@ -54,6 +54,21 @@ inlay_hints_hide_redundant_param_names_last_token: bool = false,
 /// Work around editors that do not support 'source.fixall' code actions on save. This option may delivered a substandard user experience. Please refer to the installation guide to see which editors natively support code actions on save.
 force_autofix: bool = false,
 
+/// Whether the language server provides document formatting. When disabled, Format Document is a no-op from the server.
+enable_formatting: bool = true,
+
+/// Executable of a stdin/stdout formatter. When unset, the built-in formatter (matching `zig fmt`) is used. The command must read the entire document from stdin and write the fully formatted result to stdout.
+formatter_command: ?[]const u8 = null,
+
+/// Arguments passed to `formatter_command`. For `zig fmt`, use `["fmt", "--stdin"]`. Ignored when `formatter_command` is unset.
+formatter_args: []const []const u8 = &.{},
+
+/// Show reference counts as code lenses on declarations within the build-graph compilation unit.
+enable_reference_code_lenses: bool = true,
+
+/// Report unused private declarations as faded (Unnecessary) diagnostics. Public declarations are never reported.
+enable_unused_decl_diagnostics: bool = true,
+
 /// Enables warnings for style guideline mismatches
 warn_style: bool = false,
 

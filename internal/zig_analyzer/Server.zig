@@ -26,6 +26,7 @@ const references = @import("features/references.zig");
 const semantic_tokens = @import("features/semantic_tokens.zig");
 const inlay_hints = @import("features/inlay_hints.zig");
 const code_actions = @import("features/code_actions.zig");
+const code_lens = @import("features/code_lens.zig");
 const folding_range = @import("features/folding_range.zig");
 const document_symbol = @import("features/document_symbol.zig");
 const completions = @import("features/completions.zig");
@@ -489,14 +490,18 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
             .ignore_unknown_fields = true,
         })) |*new_cfg| {
             try server.config_manager.setConfiguration(.lsp_initialization, new_cfg);
-            if (server.client_capabilities.supports_configuration) {
-                // Do not resolve configuration until we received `workspace/configuration`.
-            } else {
-                try server.resolveConfiguration();
-            }
         } else |err| {
             log.err("failed to read initialization_options: {}", .{err});
         }
+
+        var frontend_cfg: configuration.UnresolvedConfig = .{};
+        overlayFrontendOptions(arena, initialization_options, &frontend_cfg);
+        try server.config_manager.setConfiguration(.client_push, &frontend_cfg);
+
+        if (!server.client_capabilities.supports_configuration) {
+            try server.resolveConfiguration();
+        }
+        // else: resolve after `workspace/configuration`
     }
 
     return .{
@@ -533,6 +538,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
             .documentHighlightProvider = .{ .bool = true },
             .hoverProvider = .{ .bool = true },
             .codeActionProvider = .{ .code_action_options = .{ .codeActionKinds = code_actions.supported_code_actions } },
+            .codeLensProvider = .{ .resolveProvider = false },
             .declarationProvider = .{ .bool = true },
             .definitionProvider = .{ .bool = true },
             .typeDefinitionProvider = .{ .bool = true },
@@ -930,10 +936,28 @@ fn didChangeConfigurationHandler(server: *Server, arena: std.mem.Allocator, noti
             return;
         },
         .object => |object| blk: {
+            // Always apply nested frontend options (formatter, zigPath, …) from
+            // the push notification — the VS Code extension sends them this way
+            // rather than under a flat `zls` / `workspace/configuration` section.
+            var frontend_cfg: configuration.UnresolvedConfig = .{};
+            overlayFrontendOptions(arena, notification.settings, &frontend_cfg);
+            const has_frontend =
+                frontend_cfg.enable_formatting != null or
+                frontend_cfg.formatter_command != null or
+                frontend_cfg.formatter_args != null or
+                frontend_cfg.zig_exe_path != null or
+                frontend_cfg.inlay_hints_show_variable_type_hints != null or
+                frontend_cfg.inlay_hints_show_parameter_name != null or
+                frontend_cfg.inlay_hints_exclude_single_argument != null;
+            if (has_frontend) {
+                try server.config_manager.setConfiguration(.client_push, &frontend_cfg);
+                try server.resolveConfiguration();
+            }
+
             if (server.client_capabilities.supports_configuration and
                 server.client_capabilities.supports_workspace_did_change_configuration_dynamic_registration)
             {
-                log.debug("Ignoring 'workspace/didChangeConfiguration' notification in favor of 'workspace/configuration'", .{});
+                log.debug("Ignoring flat 'workspace/didChangeConfiguration' config in favor of 'workspace/configuration'", .{});
                 try server.requestConfiguration();
                 return;
             }
@@ -954,6 +978,67 @@ fn didChangeConfigurationHandler(server: *Server, arena: std.mem.Allocator, noti
 
     try server.config_manager.setConfiguration(.lsp_configuration, &new_config);
     try server.resolveConfiguration();
+}
+
+/// Nested options sent by the zig-analyzer VS Code extension (and similar clients)
+/// that are not flat `Config` fields.
+const FrontendOptions = struct {
+    formatter: ?struct {
+        command: ?[]const u8 = null,
+        args: ?[]const []const u8 = null,
+        enable: ?bool = null,
+    } = null,
+    zigPath: ?[]const u8 = null,
+    inlayHints: ?struct {
+        enable: ?bool = null,
+        parameterNames: ?bool = null,
+        excludeSingleArgument: ?bool = null,
+        types: ?bool = null,
+    } = null,
+};
+
+fn overlayFrontendOptions(
+    arena: std.mem.Allocator,
+    value: std.json.Value,
+    cfg: *configuration.UnresolvedConfig,
+) void {
+    const opts = std.json.parseFromValueLeaky(FrontendOptions, arena, value, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| {
+        log.err("failed to parse frontend options: {}", .{err});
+        return;
+    };
+
+    if (opts.formatter) |formatter| {
+        if (formatter.enable) |enable| cfg.enable_formatting = enable;
+        if (formatter.command) |command| {
+            if (command.len == 0) {
+                cfg.enable_formatting = false;
+                cfg.formatter_command = null;
+            } else {
+                cfg.formatter_command = command;
+            }
+        }
+        if (formatter.args) |args| cfg.formatter_args = args;
+    }
+
+    if (opts.zigPath) |zig_path| {
+        if (zig_path.len != 0) cfg.zig_exe_path = zig_path;
+    }
+
+    if (opts.inlayHints) |hints| {
+        // `enable: false` turns off all inlay hint categories.
+        if (hints.enable) |enable| {
+            if (!enable) {
+                cfg.inlay_hints_show_variable_type_hints = false;
+                cfg.inlay_hints_show_parameter_name = false;
+                cfg.inlay_hints_show_struct_literal_field_type = false;
+            }
+        }
+        if (hints.parameterNames) |v| cfg.inlay_hints_show_parameter_name = v;
+        if (hints.excludeSingleArgument) |v| cfg.inlay_hints_exclude_single_argument = v;
+        if (hints.types) |v| cfg.inlay_hints_show_variable_type_hints = v;
+    }
 }
 
 pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void {
@@ -1424,6 +1509,9 @@ fn documentSymbolsHandler(server: *Server, arena: std.mem.Allocator, request: ty
 }
 
 fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.document_formatting.Params) Error!?[]types.TextEdit {
+    const config = &server.config_manager.config;
+    if (!config.enable_formatting) return null;
+
     const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidParams,
@@ -1432,12 +1520,107 @@ fn formattingHandler(server: *Server, arena: std.mem.Allocator, request: types.d
 
     if (handle.tree.errors.len != 0) return null;
 
-    const formatted = try handle.tree.renderAlloc(arena);
+    const formatted = if (config.formatter_command) |command| blk: {
+        if (!std.process.can_spawn) break :blk try handle.tree.renderAlloc(arena);
+        break :blk try runStdinFormatter(
+            server.io,
+            arena,
+            command,
+            config.formatter_args,
+            handle.tree.source,
+        ) orelse return null;
+    } else try handle.tree.renderAlloc(arena);
 
     if (std.mem.eql(u8, handle.tree.source, formatted)) return null;
 
     const text_edits = try diff.edits(server.io, arena, handle.tree.source, formatted, server.offset_encoding);
     return text_edits.items;
+}
+
+fn runStdinFormatter(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    command: []const u8,
+    args: []const []const u8,
+    source: [:0]const u8,
+) Error!?[]const u8 {
+    var argv: std.ArrayList([]const u8) = try .initCapacity(arena, 1 + args.len);
+    argv.appendAssumeCapacity(command);
+    argv.appendSliceAssumeCapacity(args);
+
+    var process = std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            log.err("failed to spawn formatter '{s}': {}", .{ command, err });
+            return null;
+        },
+    };
+    defer process.kill(io);
+
+    process.stdin.?.writeStreamingAll(io, source) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            log.err("failed to write source to formatter stdin: {}", .{err});
+            return null;
+        },
+    };
+    process.stdin.?.close(io);
+    process.stdin = null;
+
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(arena, io, multi_reader_buffer.toStreams(), &.{ process.stdout.?, process.stderr.? });
+    defer multi_reader.deinit();
+
+    while (multi_reader.fill(64 * 1024, .none)) |_| {} else |err| switch (err) {
+        error.EndOfStream => {},
+        error.Canceled => return error.Canceled,
+        else => {
+            log.err("failed to read formatter output: {}", .{err});
+            return null;
+        },
+    }
+    multi_reader.checkAnyError() catch |err| {
+        log.err("formatter I/O error: {}", .{err});
+        return null;
+    };
+
+    const term = process.wait(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            log.err("failed to wait for formatter: {}", .{err});
+            return null;
+        },
+    };
+    const stdout = multi_reader.toOwnedSlice(0) catch return error.OutOfMemory;
+    const stderr = multi_reader.toOwnedSlice(1) catch return error.OutOfMemory;
+
+    const ok = switch (term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!ok) {
+        if (stderr.len != 0) {
+            log.err("formatter '{s}' failed: {s}", .{ command, stderr });
+        } else {
+            log.err("formatter '{s}' failed", .{command});
+        }
+        return null;
+    }
+    if (stderr.len != 0) {
+        log.warn("formatter '{s}' wrote to stderr: {s}", .{ command, stderr });
+    }
+
+    return stdout;
+}
+
+fn codeLensHandler(server: *Server, arena: std.mem.Allocator, request: types.code_lens.Params) Error!?[]types.code_lens.Response {
+    return try code_lens.codeLensHandler(server, arena, request);
 }
 
 fn renameHandler(server: *Server, arena: std.mem.Allocator, request: types.rename.Params) Error!?types.WorkspaceEdit {
@@ -1582,6 +1765,7 @@ const HandledRequestParams = union(enum) {
     @"textDocument/hover": types.Hover.Params,
     @"textDocument/documentSymbol": types.DocumentSymbol.Params,
     @"textDocument/formatting": types.document_formatting.Params,
+    @"textDocument/codeLens": types.code_lens.Params,
     @"textDocument/rename": types.rename.Params,
     @"textDocument/prepareRename": types.prepare_rename.Params,
     @"textDocument/references": types.reference.Params,
@@ -1627,6 +1811,7 @@ fn isBlockingMessage(msg: Message) bool {
             .@"textDocument/hover",
             .@"textDocument/documentSymbol",
             .@"textDocument/formatting",
+            .@"textDocument/codeLens",
             .@"textDocument/rename",
             .@"textDocument/prepareRename",
             .@"textDocument/references",
@@ -1788,6 +1973,7 @@ pub fn sendRequestSync(server: *Server, arena: std.mem.Allocator, comptime metho
         .@"textDocument/hover" => try server.hoverHandler(arena, params),
         .@"textDocument/documentSymbol" => try server.documentSymbolsHandler(arena, params),
         .@"textDocument/formatting" => try server.formattingHandler(arena, params),
+        .@"textDocument/codeLens" => try server.codeLensHandler(arena, params),
         .@"textDocument/rename" => try server.renameHandler(arena, params),
         .@"textDocument/prepareRename" => try server.prepareRenameHandler(arena, params),
         .@"textDocument/references" => try server.referencesHandler(arena, params),

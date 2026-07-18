@@ -85,6 +85,10 @@ pub const Manager = struct {
         lsp_initialization,
         /// `workspace/didChangeConfiguration` or `workspace/configuration`
         lsp_configuration,
+        /// Nested client options (e.g. VS Code `zigAnalyzer.formatter.*`) pushed
+        /// alongside flat ZLS settings. Highest priority so `workspace/configuration`
+        /// responses do not wipe them.
+        client_push,
     };
 
     /// Does not resolve or validate config options until `resolveConfiguration` has been called.

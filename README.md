@@ -15,7 +15,7 @@ This extension is a thin LSP client — it does not bundle or download the `zig-
 
 ### Formatting
 
-By default, "Format Document" runs the standard, zero-config `zig fmt --stdin`. If you'd rather use a different `zig` toolchain, or a wrapper script that also runs a linter, set:
+By default, "Format Document" runs the configured stdin formatter (`zig fmt --stdin`). Override with:
 
 ```json
 {
@@ -24,7 +24,9 @@ By default, "Format Document" runs the standard, zero-config `zig fmt --stdin`. 
 }
 ```
 
-**Contract your formatter must follow** — this is a hard requirement, not a suggestion, since the server pipes text through it directly with no validation of the output beyond "did it exit 0 with nothing on stderr":
+Set `"zigAnalyzer.formatter.enable": false` (or clear `formatter.command` to `""`) to disable server-side formatting.
+
+**Contract your formatter must follow** — this is a hard requirement, not a suggestion, since the server pipes text through it directly with no validation of the output beyond "did it exit 0":
 
 1. Read the entire document from **stdin**.
 2. Write the fully formatted result to **stdout**.
@@ -46,8 +48,9 @@ Whatever you configure is spawned directly (never through a shell), so shell met
 
 When editing Zig files (with editor code lenses enabled):
 
-- In `build.zig`: a **zig build** lens above `fn build`, and a **zig build \<step\>** lens above each `b.step("…")`.
-- Above `fn main`: if `build.zig` wires that file as an executable root to a run step (the usual `b.step` → `addExecutable` → `addRunArtifact` → `dependOn` pattern), the lens runs **zig build \<step\>**. Otherwise it falls back to **zig run** on that file.
+- In `build.zig` (from the **language server**): a **zig build** lens above `fn build`, and a **zig build \<step\>** lens above each `b.step("…")`. Clicking runs the command `zigAnalyzer.executeBuild` — any LSP client can handle that command; the VS Code extension registers it as a task.
+- Above `fn main` (VS Code extension helper): if `build.zig` wires that file as an executable root to a run step, the lens runs **zig build \<step\>**. Otherwise it falls back to **zig run** on that file.
+- On top-level declarations (from the language server): a **N references** lens showing how many times the symbol is referenced within the build-graph compilation unit. Counts are for that binding only (e.g. `const types = lsp.types` does **not** count the `lsp.types` field access as a use of the alias).
 
 ## Known Issues
 

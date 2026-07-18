@@ -101,7 +101,7 @@ const Builder = struct {
             builder.target_symbol.nameToken(),
         );
 
-        var candidate: Analyser.DeclWithHandle, const name_token = candidate: switch (tree.nodeTag(node)) {
+        const candidate: Analyser.DeclWithHandle, const name_token = candidate: switch (tree.nodeTag(node)) {
             .identifier,
             .test_decl,
             => |tag| {
@@ -229,8 +229,11 @@ const Builder = struct {
             else => return,
         };
 
-        candidate = try builder.analyser.resolveVarDeclAlias(candidate) orelse candidate;
-
+        // Match the exact declaration binding — do not follow `const alias = other`
+        // through to `other`. Otherwise a lens/refs query on a local alias like
+        // `const types = lsp.types` reports 0 hits (usages resolve to `lsp.types`
+        // and no longer equal the alias), while Find All References that *does*
+        // follow aliases incorrectly also counts the `lsp.types` field access.
         if (builder.target_symbol.eql(candidate)) {
             try builder.add(handle, name_token);
         }
@@ -312,6 +315,28 @@ fn symbolReferences(
     }
 
     return builder.locations;
+}
+
+/// Collects references to `target_symbol` within the build-graph compilation unit.
+/// Does not include the declaration site itself.
+pub fn collectSymbolReferences(
+    analyser: *Analyser,
+    target_symbol: Analyser.DeclWithHandle,
+    current_handle: *DocumentStore.Handle,
+    encoding: offsets.Encoding,
+) Analyser.Error!std.ArrayList(types.Location) {
+    return symbolReferences(
+        analyser,
+        .{ .references = .{
+            .textDocument = .{ .uri = current_handle.uri.raw },
+            .position = .{ .line = 0, .character = 0 },
+            .context = .{ .includeDeclaration = false },
+        } },
+        target_symbol,
+        encoding,
+        false,
+        current_handle,
+    );
 }
 
 fn gatherWorkspaceReferenceCandidates(
@@ -697,7 +722,7 @@ pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: Gen
         const name_loc = offsets.identifierLocFromIndex(&handle.tree, source_index) orelse return null;
         const name = offsets.locToSlice(handle.tree.source, name_loc);
 
-        var target_decl = switch (pos_context) {
+        const target_decl = switch (pos_context) {
             .var_access, .test_doctest_name => try analyser.lookupSymbolGlobal(handle, name, source_index),
             .field_access => |loc| z: {
                 const held_loc = offsets.locMerge(loc, name_loc);
@@ -714,8 +739,8 @@ pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: Gen
             else => null,
         } orelse return null;
 
-        target_decl = try analyser.resolveVarDeclAlias(target_decl) orelse target_decl;
-
+        // Stay on this binding. Following aliases made rename/refs jump to the
+        // aliased symbol (e.g. renaming a local `allocator` touching `std`'s).
         break :locs switch (target_decl.decl) {
             .label => |payload| try labelReferences(
                 arena,
@@ -771,4 +796,82 @@ pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: Gen
             return .{ .highlight = highlights.items };
         },
     }
+}
+
+test "collectSymbolReferences: local alias usages, not aliased field" {
+    const DiagnosticsCollection = @import("../DiagnosticsCollection.zig");
+    const InternPool = @import("../analyser/InternPool.zig");
+
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var environ_map: std.process.Environ.Map = .init(allocator);
+    defer environ_map.deinit();
+
+    var diagnostics_collection: DiagnosticsCollection = .{ .io = io, .allocator = allocator };
+    defer diagnostics_collection.deinit();
+
+    var store: DocumentStore = .{
+        .io = io,
+        .allocator = allocator,
+        .config = .{
+            .environ_map = &environ_map,
+            .zig_exe_path = null,
+            .zig_lib_dir = null,
+            .build_runner_path = null,
+            .builtin_path = null,
+            .global_cache_dir = null,
+            .wasi_preopens = {},
+        },
+        .diagnostics_collection = &diagnostics_collection,
+    };
+    defer store.deinit();
+
+    var ip = try InternPool.init(io, allocator);
+    defer ip.deinit(allocator);
+
+    const source =
+        \\const Outer = struct {
+        \\    pub const Inner = struct {};
+        \\};
+        \\const types = Outer.Inner;
+        \\fn use(a: types, b: types) void {
+        \\    _ = a;
+        \\    _ = b;
+        \\    const again: types = .{};
+        \\    _ = again;
+        \\}
+    ;
+
+    const uri: Uri = try .parse(allocator, "file:///test_alias_refs.zig");
+    defer uri.deinit(allocator);
+
+    try store.openLspSyncedDocument(uri, source);
+    const handle = store.getHandle(uri).?;
+
+    const types_node = blk: {
+        for (handle.tree.rootDecls()) |node| {
+            switch (handle.tree.nodeTag(node)) {
+                .simple_var_decl, .global_var_decl, .local_var_decl, .aligned_var_decl => {
+                    const name = offsets.identifierTokenToNameSlice(&handle.tree, handle.tree.fullVarDecl(node).?.ast.mut_token + 1);
+                    if (std.mem.eql(u8, name, "types")) break :blk node;
+                },
+                else => {},
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+
+    var arena_state: std.heap.ArenaAllocator = .init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var analyser: Analyser = .init(allocator, arena, &store, &ip, handle);
+    defer analyser.deinit();
+
+    const decl: Analyser.DeclWithHandle = .{ .decl = .{ .ast_node = types_node }, .handle = handle };
+    const locs = try collectSymbolReferences(&analyser, decl, handle, .@"utf-8");
+
+    // usages: `a: types`, `b: types`, `again: types` — not `Outer.Inner` and not the decl name itself
+    try std.testing.expectEqual(@as(usize, 3), locs.items.len);
 }

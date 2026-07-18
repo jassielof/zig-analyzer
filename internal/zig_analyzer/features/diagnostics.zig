@@ -15,6 +15,7 @@ const offsets = @import("../offsets.zig");
 const Uri = @import("../Uri.zig");
 const code_actions = @import("code_actions.zig");
 const DiagnosticsCollection = @import("../DiagnosticsCollection.zig");
+const references = @import("references.zig");
 
 const Zir = std.zig.Zir;
 
@@ -69,6 +70,18 @@ pub fn generateDiagnostics(
 
         if (config.highlight_global_var_declarations and handle.tree.mode == .zig) {
             try collectGlobalVarDiagnostics(&handle.tree, arena, &diagnostics, server.offset_encoding);
+        }
+
+        if (config.enable_unused_decl_diagnostics and handle.tree.mode == .zig and handle.tree.errors.len == 0) {
+            var analyser = server.initAnalyser(arena, handle);
+            defer analyser.deinit();
+            try collectUnusedDeclDiagnostics(
+                &analyser,
+                handle,
+                arena,
+                &diagnostics,
+                server.offset_encoding,
+            );
         }
 
         try server.diagnostics_collection.pushSingleDocumentDiagnostics(
@@ -259,6 +272,67 @@ fn collectGlobalVarDiagnostics(
             },
             else => {},
         }
+    }
+}
+
+/// Dim unused *private* container-level declarations. Public declarations are
+/// left alone — they form the module API and may be used from outside this file.
+fn collectUnusedDeclDiagnostics(
+    analyser: *Analyser,
+    handle: *DocumentStore.Handle,
+    arena: std.mem.Allocator,
+    diagnostics: *std.ArrayList(types.Diagnostic),
+    offset_encoding: offsets.Encoding,
+) Analyser.Error!void {
+    const tree = &handle.tree;
+
+    for (tree.rootDecls()) |node| {
+        switch (tree.nodeTag(node)) {
+            .global_var_decl,
+            .local_var_decl,
+            .simple_var_decl,
+            .aligned_var_decl,
+            .fn_proto,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto_simple,
+            .fn_decl,
+            => {},
+            else => continue,
+        }
+
+        var buf: [1]Ast.Node.Index = undefined;
+        if (tree.fullFnProto(&buf, node)) |fn_proto| {
+            if (fn_proto.name_token == null) continue;
+            if (fn_proto.extern_export_inline_token) |tok| {
+                const tag = tree.tokenTag(tok);
+                if (tag == .keyword_export or tag == .keyword_extern) continue;
+            }
+        }
+
+        const decl: Analyser.DeclWithHandle = .{ .decl = .{ .ast_node = node }, .handle = handle };
+        if (decl.isPublic()) continue;
+
+        const name = offsets.identifierTokenToNameSlice(tree, decl.nameToken());
+        if (name.len == 0 or name[0] == '_') continue;
+        if (std.mem.eql(u8, name, "main")) continue;
+
+        const locs = try references.collectSymbolReferences(
+            analyser,
+            decl,
+            handle,
+            offset_encoding,
+        );
+        if (locs.items.len != 0) continue;
+
+        try diagnostics.append(arena, .{
+            .range = offsets.tokenToRange(tree, decl.nameToken(), offset_encoding),
+            .severity = .Hint,
+            .code = .{ .string = "unused_decl" },
+            .source = "zls",
+            .message = try std.fmt.allocPrint(arena, "unused {s}", .{name}),
+            .tags = &.{.Unnecessary},
+        });
     }
 }
 

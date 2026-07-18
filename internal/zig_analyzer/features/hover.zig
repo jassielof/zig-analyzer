@@ -73,14 +73,88 @@ fn hoverSymbol(
         => tree.tokenSlice(decl_handle.nameToken()),
     };
 
-    return try hoverSymbolResolvedType(
+    const hover_text = try hoverSymbolResolvedType(
         analyser,
         arena,
         def_str,
         markup_kind,
         &doc_strings,
         maybe_resolved_type,
-    );
+    ) orelse return null;
+
+    if (try appendDoctestExample(arena, decl_handle, markup_kind, hover_text)) |with_doctest|
+        return with_doctest;
+
+    return hover_text;
+}
+
+/// If `decl_handle` has a same-file doctest (`test DeclName { ... }`), append it
+/// as a documentation example section.
+fn appendDoctestExample(
+    arena: std.mem.Allocator,
+    decl_handle: Analyser.DeclWithHandle,
+    markup_kind: types.MarkupKind,
+    hover_text: []const u8,
+) error{OutOfMemory}!?[]const u8 {
+    const node = switch (decl_handle.decl) {
+        .ast_node => |n| n,
+        else => return null,
+    };
+    const tree = &decl_handle.handle.tree;
+    switch (tree.nodeTag(node)) {
+        .fn_proto,
+        .fn_proto_multi,
+        .fn_proto_one,
+        .fn_proto_simple,
+        .fn_decl,
+        .global_var_decl,
+        .local_var_decl,
+        .aligned_var_decl,
+        .simple_var_decl,
+        => {},
+        else => return null,
+    }
+
+    const decl_name = offsets.identifierTokenToNameSlice(tree, decl_handle.nameToken());
+    const doctest_node = findDoctestNode(tree, decl_name) orelse return null;
+
+    const doctest_docs = try Analyser.getDocComments(arena, tree, doctest_node);
+    const doctest_source = offsets.nodeToSlice(tree, doctest_node);
+
+    var output: std.ArrayList(u8) = .empty;
+    try output.appendSlice(arena, hover_text);
+
+    if (markup_kind == .markdown) {
+        try output.appendSlice(arena, "\n\n---\n## Doctest example\n");
+        if (doctest_docs) |docs| {
+            try output.appendSlice(arena, "\n");
+            try output.appendSlice(arena, docs);
+            try output.appendSlice(arena, "\n");
+        }
+        try output.print(arena, "\n```zig\n{s}\n```", .{doctest_source});
+    } else {
+        try output.appendSlice(arena, "\n\nDoctest example:\n");
+        if (doctest_docs) |docs| {
+            try output.appendSlice(arena, docs);
+            try output.appendSlice(arena, "\n");
+        }
+        try output.appendSlice(arena, doctest_source);
+    }
+
+    return output.items;
+}
+
+fn findDoctestNode(tree: *const Ast, decl_name: []const u8) ?Ast.Node.Index {
+    for (0..tree.nodes.len) |i| {
+        const member: Ast.Node.Index = @enumFromInt(i);
+        if (tree.nodeTag(member) != .test_decl) continue;
+        const name_and_token = ast.testDeclNameAndToken(tree, member) orelse continue;
+        const name_token, const name = name_and_token;
+        // Doctests use an identifier name (not a string literal).
+        if (tree.tokenTag(name_token) != .identifier) continue;
+        if (std.mem.eql(u8, name, decl_name)) return member;
+    }
+    return null;
 }
 
 fn hoverSymbolResolvedType(

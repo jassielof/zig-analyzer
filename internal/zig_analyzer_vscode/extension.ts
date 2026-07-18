@@ -136,20 +136,23 @@ function getServerPath(): string | undefined {
 }
 
 interface FormatterConfig {
+  enable: boolean;
   command: string;
   args: string[];
 }
 
 /// Sent to the server as both `initialize`'s `initializationOptions` and
 /// `workspace/didChangeConfiguration`'s `settings` (see
-/// `Server.applyOptions` in src/lib/server.zig — both parse the same
-/// `{ formatter: { command, args } }` shape). The configured command must
+/// `Server.applyFrontendOptions`). The configured command must
 /// behave like `zig fmt --stdin`: read the whole document from stdin,
 /// write the fully formatted result to stdout, exit 0 on success.
 function getFormatterConfig(): FormatterConfig {
   const config = vscode.workspace.getConfiguration("zigAnalyzer");
+  const enable = config.get<boolean>("formatter.enable", true);
+  const command = config.get<string>("formatter.command", "zig") || "";
   return {
-    command: config.get<string>("formatter.command", "zig") || "zig",
+    enable: enable && command.length > 0,
+    command: command || "zig",
     args: config.get<string[]>("formatter.args", ["fmt", "--stdin"]),
   };
 }
