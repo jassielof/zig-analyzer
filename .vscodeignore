@@ -27,6 +27,7 @@ build/
 cmd/
 dependencies/
 lib/
+tools/
 references/
 zig-out/
 *.zig-cache/

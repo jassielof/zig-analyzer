@@ -7,6 +7,8 @@ builds:
 
 archives:
   - id: zig-analyzer
+    formats:
+      - xz
     files:
       - README.adoc
       - LICENSE.txt

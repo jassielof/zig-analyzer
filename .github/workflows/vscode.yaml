@@ -39,3 +39,8 @@ jobs:
         run: pnpm run lint
       - name: Package
         run: pnpm run package
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: vscode-extension
+          path: "*.vsix"
