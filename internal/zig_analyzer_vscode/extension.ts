@@ -8,7 +8,6 @@ import {
   LanguageClient,
   type LanguageClientOptions,
   type ServerOptions,
-  TransportKind,
 } from "vscode-languageclient/node";
 import { ZigBuildCodeLensProvider } from "./buildCodeLenses";
 import { ZonCodeLensProvider } from "./zonCodeLenses";
@@ -76,7 +75,6 @@ async function start(): Promise<void> {
 
   const serverOptions: ServerOptions = {
     command: serverPath,
-    transport: TransportKind.stdio,
   };
 
   const clientOptions: LanguageClientOptions = {
