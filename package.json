@@ -95,68 +95,183 @@
       "title": "Zig Analyzer",
       "properties": {
         "zigAnalyzer.serverPath": {
-          "type": "string",
-          "default": "",
           "scope": "machine-overridable",
-          "description": "Path to the zig-analyzer executable. If empty, the extension won't start the language server."
-        },
-        "zigAnalyzer.zigPath": {
           "type": "string",
-          "default": "zig",
-          "scope": "machine-overridable",
-          "description": "Path to the zig executable, used by \"Zig Analyzer: Run Build Step\" to list and run build.zig steps."
+          "description": "Path to the zig-analyzer executable. If empty, the extension looks for `zig-analyzer` on PATH.",
+          "format": "path",
+          "default": ""
         },
         "zigAnalyzer.trace.server": {
+          "scope": "window",
           "type": "string",
+          "description": "Traces the communication between VS Code and the zig-analyzer language server.",
           "enum": [
             "off",
             "messages",
             "verbose"
           ],
-          "default": "off",
-          "description": "Traces the communication between VS Code and the zig-analyzer language server."
-        },
-        "zigAnalyzer.formatter.command": {
-          "type": "string",
-          "default": "zig",
-          "scope": "machine-overridable",
-          "markdownDescription": "The formatter executable to run for \"Format Document\". **Must behave like `zig fmt --stdin`**: read the entire document from stdin, write the fully formatted result to stdout, and exit with code 0 on success. A nonzero exit or any stderr output is treated as a formatting failure and the document is left unchanged.\n\nCombined with `#zigAnalyzer.formatter.args#` to build the full command line. Change this if the zero-config standard formatter (`zig fmt`) isn't what you want — e.g. a different Zig toolchain, or a wrapper script that also runs a linter — as long as it honors the stdin/stdout contract above. Set `#zigAnalyzer.formatter.enable#` to `false` (or clear this to an empty string) to disable server formatting."
-        },
-        "zigAnalyzer.formatter.args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "fmt",
-            "--stdin"
-          ],
-          "description": "Arguments passed to zigAnalyzer.formatter.command. The default runs the standard, zero-config `zig fmt --stdin`."
-        },
-        "zigAnalyzer.formatter.enable": {
-          "type": "boolean",
-          "default": true,
-          "description": "Whether zig-analyzer provides document formatting. When false, Format Document is left to other providers (or disabled)."
+          "default": "off"
         },
         "zigAnalyzer.inlayHints.enable": {
+          "scope": "resource",
           "type": "boolean",
-          "default": true,
-          "description": "Enable inlay hints from zig-analyzer (parameter names at call sites). Requires the editor's Inlay Hints setting to also be on."
+          "description": "Master switch for zig-analyzer inlay hints. When false, all inlay hint categories are disabled.",
+          "default": true
         },
-        "zigAnalyzer.inlayHints.parameterNames": {
+        "zigAnalyzer.enableSnippets": {
+          "scope": "resource",
           "type": "boolean",
-          "default": true,
-          "description": "Show parameter-name inlay hints before call-site arguments."
+          "description": "Enables snippet completions when the client also supports them.",
+          "default": true
         },
-        "zigAnalyzer.inlayHints.excludeSingleArgument": {
+        "zigAnalyzer.enableArgumentPlaceholders": {
+          "scope": "resource",
           "type": "boolean",
-          "default": true,
-          "description": "Omit parameter-name inlay hints for calls with exactly one argument."
+          "description": "Whether to enable function argument placeholder completions.",
+          "default": true
+        },
+        "zigAnalyzer.completionLabelDetails": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Whether to show the function signature in completion results. May improve readability in some editors when disabled.",
+          "default": true
+        },
+        "zigAnalyzer.buildOnSave.enable": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Whether to enable build-on-save diagnostics. When unset, enabled automatically if `build.zig` declares a `check` step.",
+          "default": null
+        },
+        "zigAnalyzer.buildOnSave.args": {
+          "scope": "resource",
+          "type": "array",
+          "description": "Extra arguments passed to `zig build` for build-on-save. If `build.zig` declares a `check` step, that step is preferred over `install`.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "zigAnalyzer.semanticTokens": {
+          "scope": "resource",
+          "type": "string",
+          "description": "Semantic token detail level. `partial` only includes information that requires semantic analysis.",
+          "enum": [
+            "none",
+            "partial",
+            "full"
+          ],
+          "default": "full"
         },
         "zigAnalyzer.inlayHints.types": {
+          "scope": "resource",
           "type": "boolean",
-          "default": true,
-          "description": "Show inferred-type inlay hints for const/var declarations initialized with a literal (e.g. a string) and no explicit type annotation."
+          "description": "Show inferred-type inlay hints for const/var declarations.",
+          "default": true
+        },
+        "zigAnalyzer.inlayHints.structLiteralFieldType": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Show inlay hints for fields in struct and union literals.",
+          "default": true
+        },
+        "zigAnalyzer.inlayHints.parameterNames": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Show parameter-name inlay hints at call sites.",
+          "default": true
+        },
+        "zigAnalyzer.inlayHints.builtins": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Show inlay hints for builtin functions.",
+          "default": true
+        },
+        "zigAnalyzer.inlayHints.excludeSingleArgument": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Omit parameter-name inlay hints for calls with exactly one argument.",
+          "default": true
+        },
+        "zigAnalyzer.inlayHints.hideRedundantParamNames": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Hide inlay hints when the parameter name matches the identifier (e.g. `foo: foo`).",
+          "default": false
+        },
+        "zigAnalyzer.inlayHints.hideRedundantParamNamesLastToken": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Hide inlay hints when the parameter name matches the last token of a parameter node (e.g. `foo: bar.foo`).",
+          "default": false
+        },
+        "zigAnalyzer.formatter.enable": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Whether the language server provides document formatting. When disabled, Format Document is a no-op from the server.",
+          "default": true
+        },
+        "zigAnalyzer.formatter.command": {
+          "scope": "machine-overridable",
+          "type": "string",
+          "description": "Executable of a stdin/stdout formatter. When unset, the built-in formatter (matching `zig fmt`) is used. Must read the entire document from stdin and write the fully formatted result to stdout.",
+          "format": "path"
+        },
+        "zigAnalyzer.formatter.args": {
+          "scope": "resource",
+          "type": "array",
+          "description": "Arguments passed to `formatter_command`. For `zig fmt`, use `[\"fmt\", \"--stdin\"]`. Ignored when `formatter_command` is unset.",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "zigAnalyzer.referenceCodeLenses": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Show reference counts as code lenses on declarations within the build-graph compilation unit.",
+          "default": true
+        },
+        "zigAnalyzer.unusedDeclDiagnostics": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Report unused private declarations as faded (Unnecessary) diagnostics. Public declarations are never reported.",
+          "default": true
+        },
+        "zigAnalyzer.preferAstCheckAsChildProcess": {
+          "scope": "resource",
+          "type": "boolean",
+          "description": "Prefer running `zig ast-check` as a child process instead of the built-in AstGen path.",
+          "default": true
+        },
+        "zigAnalyzer.builtinPath": {
+          "scope": "machine-overridable",
+          "type": "string",
+          "description": "Override the path to the `builtin` module. Automatically resolved if unset.",
+          "format": "path"
+        },
+        "zigAnalyzer.libPath": {
+          "scope": "machine-overridable",
+          "type": "string",
+          "description": "Override the Zig library path. Automatically resolved from `zig_exe_path` when unset.",
+          "format": "path"
+        },
+        "zigAnalyzer.zigPath": {
+          "scope": "machine-overridable",
+          "type": "string",
+          "description": "Path to the Zig executable (not the directory). If unset, `zig` is looked up in `PATH`.",
+          "format": "path"
+        },
+        "zigAnalyzer.buildRunnerPath": {
+          "scope": "machine-overridable",
+          "type": "string",
+          "description": "Custom build runner used to resolve build system information.",
+          "format": "path"
+        },
+        "zigAnalyzer.globalCachePath": {
+          "scope": "machine-overridable",
+          "type": "string",
+          "description": "Directory used as Zig's cache. Defaults to `${KnownFolders.Cache}/zig-analyzer`.",
+          "format": "path"
         }
       }
     },

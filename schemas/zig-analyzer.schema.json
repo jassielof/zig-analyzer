@@ -1,0 +1,139 @@
+{
+    "$schema": "http://json-schema.org/draft-04/schema",
+    "title": "Zig Analyzer Config",
+    "description": "Configuration file for zig-analyzer",
+    "type": "object",
+    "properties": {
+        "enable_snippets": {
+            "description": "Enables snippet completions when the client also supports them.",
+            "type": "boolean",
+            "default": true
+        },
+        "enable_argument_placeholders": {
+            "description": "Whether to enable function argument placeholder completions.",
+            "type": "boolean",
+            "default": true
+        },
+        "completion_label_details": {
+            "description": "Whether to show the function signature in completion results. May improve readability in some editors when disabled.",
+            "type": "boolean",
+            "default": true
+        },
+        "enable_build_on_save": {
+            "description": "Whether to enable build-on-save diagnostics. When unset, enabled automatically if `build.zig` declares a `check` step.",
+            "type": "boolean",
+            "default": null
+        },
+        "build_on_save_args": {
+            "description": "Extra arguments passed to `zig build` for build-on-save. If `build.zig` declares a `check` step, that step is preferred over `install`.",
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "default": []
+        },
+        "semantic_tokens": {
+            "description": "Semantic token detail level. `partial` only includes information that requires semantic analysis.",
+            "type": "string",
+            "enum": [
+                "none",
+                "partial",
+                "full"
+            ],
+            "default": "full"
+        },
+        "inlay_hints_show_variable_type_hints": {
+            "description": "Show inferred-type inlay hints for const/var declarations.",
+            "type": "boolean",
+            "default": true
+        },
+        "inlay_hints_show_struct_literal_field_type": {
+            "description": "Show inlay hints for fields in struct and union literals.",
+            "type": "boolean",
+            "default": true
+        },
+        "inlay_hints_show_parameter_name": {
+            "description": "Show parameter-name inlay hints at call sites.",
+            "type": "boolean",
+            "default": true
+        },
+        "inlay_hints_show_builtin": {
+            "description": "Show inlay hints for builtin functions.",
+            "type": "boolean",
+            "default": true
+        },
+        "inlay_hints_exclude_single_argument": {
+            "description": "Omit parameter-name inlay hints for calls with exactly one argument.",
+            "type": "boolean",
+            "default": true
+        },
+        "inlay_hints_hide_redundant_param_names": {
+            "description": "Hide inlay hints when the parameter name matches the identifier (e.g. `foo: foo`).",
+            "type": "boolean",
+            "default": false
+        },
+        "inlay_hints_hide_redundant_param_names_last_token": {
+            "description": "Hide inlay hints when the parameter name matches the last token of a parameter node (e.g. `foo: bar.foo`).",
+            "type": "boolean",
+            "default": false
+        },
+        "enable_formatting": {
+            "description": "Whether the language server provides document formatting. When disabled, Format Document is a no-op from the server.",
+            "type": "boolean",
+            "default": true
+        },
+        "formatter_command": {
+            "description": "Executable of a stdin/stdout formatter. When unset, the built-in formatter (matching `zig fmt`) is used. Must read the entire document from stdin and write the fully formatted result to stdout.",
+            "type": "string",
+            "default": null
+        },
+        "formatter_args": {
+            "description": "Arguments passed to `formatter_command`. For `zig fmt`, use `[\"fmt\", \"--stdin\"]`. Ignored when `formatter_command` is unset.",
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "default": []
+        },
+        "enable_reference_code_lenses": {
+            "description": "Show reference counts as code lenses on declarations within the build-graph compilation unit.",
+            "type": "boolean",
+            "default": true
+        },
+        "enable_unused_decl_diagnostics": {
+            "description": "Report unused private declarations as faded (Unnecessary) diagnostics. Public declarations are never reported.",
+            "type": "boolean",
+            "default": true
+        },
+        "prefer_ast_check_as_child_process": {
+            "description": "Prefer running `zig ast-check` as a child process instead of the built-in AstGen path.",
+            "type": "boolean",
+            "default": true
+        },
+        "builtin_path": {
+            "description": "Override the path to the `builtin` module. Automatically resolved if unset.",
+            "type": "string",
+            "default": null
+        },
+        "zig_lib_path": {
+            "description": "Override the Zig library path. Automatically resolved from `zig_exe_path` when unset.",
+            "type": "string",
+            "default": null
+        },
+        "zig_exe_path": {
+            "description": "Path to the Zig executable (not the directory). If unset, `zig` is looked up in `PATH`.",
+            "type": "string",
+            "default": null
+        },
+        "build_runner_path": {
+            "description": "Custom build runner used to resolve build system information.",
+            "type": "string",
+            "default": null
+        },
+        "global_cache_path": {
+            "description": "Directory used as Zig's cache. Defaults to `${KnownFolders.Cache}/zig-analyzer`.",
+            "type": "string",
+            "default": null
+        }
+    }
+}

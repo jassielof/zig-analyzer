@@ -279,7 +279,7 @@ pub fn collectAutoDiscardDiagnostics(
             .range = offsets.tokenToRange(tree, identifier_token, offset_encoding),
             .severity = .Information,
             .code = null,
-            .source = "zls",
+            .source = "zig-analyzer",
             .message = "auto discard for unused variable",
             .relatedInformation = related_info,
         });

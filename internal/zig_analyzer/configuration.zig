@@ -85,10 +85,6 @@ pub const Manager = struct {
         lsp_initialization,
         /// `workspace/didChangeConfiguration` or `workspace/configuration`
         lsp_configuration,
-        /// Nested client options (e.g. VS Code `zigAnalyzer.formatter.*`) pushed
-        /// alongside flat ZLS settings. Highest priority so `workspace/configuration`
-        /// responses do not wipe them.
-        client_push,
     };
 
     /// Does not resolve or validate config options until `resolveConfiguration` has been called.
@@ -710,6 +706,121 @@ pub const UnresolvedConfig = blk: {
     }
     break :blk @Struct(.auto, null, std.meta.fieldNames(Config), &field_types, &field_attrs);
 };
+
+/// Nested client settings (`zigAnalyzer.*` in VS Code) that map onto flat `Config` fields.
+const ZigAnalyzerSection = struct {
+    enableSnippets: ?bool = null,
+    enableArgumentPlaceholders: ?bool = null,
+    completionLabelDetails: ?bool = null,
+    buildOnSave: ?struct {
+        enable: ?bool = null,
+        args: ?[]const []const u8 = null,
+    } = null,
+    semanticTokens: ?@FieldType(Config, "semantic_tokens") = null,
+    inlayHints: ?struct {
+        enable: ?bool = null,
+        types: ?bool = null,
+        structLiteralFieldType: ?bool = null,
+        parameterNames: ?bool = null,
+        builtins: ?bool = null,
+        excludeSingleArgument: ?bool = null,
+        hideRedundantParamNames: ?bool = null,
+        hideRedundantParamNamesLastToken: ?bool = null,
+    } = null,
+    formatter: ?struct {
+        enable: ?bool = null,
+        command: ?[]const u8 = null,
+        args: ?[]const []const u8 = null,
+    } = null,
+    referenceCodeLenses: ?bool = null,
+    unusedDeclDiagnostics: ?bool = null,
+    preferAstCheckAsChildProcess: ?bool = null,
+    builtinPath: ?[]const u8 = null,
+    libPath: ?[]const u8 = null,
+    zigPath: ?[]const u8 = null,
+    buildRunnerPath: ?[]const u8 = null,
+    globalCachePath: ?[]const u8 = null,
+};
+
+fn applyZigAnalyzerSection(section: ZigAnalyzerSection, cfg: *UnresolvedConfig) void {
+    if (section.enableSnippets) |v| cfg.enable_snippets = v;
+    if (section.enableArgumentPlaceholders) |v| cfg.enable_argument_placeholders = v;
+    if (section.completionLabelDetails) |v| cfg.completion_label_details = v;
+    if (section.buildOnSave) |bos| {
+        if (bos.enable) |v| cfg.enable_build_on_save = v;
+        if (bos.args) |v| cfg.build_on_save_args = v;
+    }
+    if (section.semanticTokens) |v| cfg.semantic_tokens = v;
+    if (section.inlayHints) |hints| {
+        if (hints.enable) |enable| {
+            if (!enable) {
+                cfg.inlay_hints_show_variable_type_hints = false;
+                cfg.inlay_hints_show_parameter_name = false;
+                cfg.inlay_hints_show_struct_literal_field_type = false;
+                cfg.inlay_hints_show_builtin = false;
+            }
+        }
+        if (hints.types) |v| cfg.inlay_hints_show_variable_type_hints = v;
+        if (hints.structLiteralFieldType) |v| cfg.inlay_hints_show_struct_literal_field_type = v;
+        if (hints.parameterNames) |v| cfg.inlay_hints_show_parameter_name = v;
+        if (hints.builtins) |v| cfg.inlay_hints_show_builtin = v;
+        if (hints.excludeSingleArgument) |v| cfg.inlay_hints_exclude_single_argument = v;
+        if (hints.hideRedundantParamNames) |v| cfg.inlay_hints_hide_redundant_param_names = v;
+        if (hints.hideRedundantParamNamesLastToken) |v| cfg.inlay_hints_hide_redundant_param_names_last_token = v;
+    }
+    if (section.formatter) |formatter| {
+        if (formatter.enable) |enable| cfg.enable_formatting = enable;
+        if (formatter.command) |command| {
+            if (command.len == 0) {
+                cfg.enable_formatting = false;
+            } else {
+                cfg.formatter_command = command;
+            }
+        }
+        if (formatter.args) |args| cfg.formatter_args = args;
+    }
+    if (section.referenceCodeLenses) |v| cfg.enable_reference_code_lenses = v;
+    if (section.unusedDeclDiagnostics) |v| cfg.enable_unused_decl_diagnostics = v;
+    if (section.preferAstCheckAsChildProcess) |v| cfg.prefer_ast_check_as_child_process = v;
+    if (section.builtinPath) |v| {
+        if (v.len != 0) cfg.builtin_path = v;
+    }
+    if (section.libPath) |v| {
+        if (v.len != 0) cfg.zig_lib_path = v;
+    }
+    if (section.zigPath) |v| {
+        if (v.len != 0) cfg.zig_exe_path = v;
+    }
+    if (section.buildRunnerPath) |v| {
+        if (v.len != 0) cfg.build_runner_path = v;
+    }
+    if (section.globalCachePath) |v| {
+        if (v.len != 0) cfg.global_cache_path = v;
+    }
+}
+
+/// Parse client configuration from either:
+/// - a nested `zigAnalyzer` object (VS Code `workspace/configuration` / init options), or
+/// - flat snake_case `Config` fields (other LSP clients / JSON config files).
+pub fn parseClientConfiguration(
+    arena: std.mem.Allocator,
+    value: std.json.Value,
+) error{ParseError}!UnresolvedConfig {
+    const root: std.json.Value = switch (value) {
+        .object => |object| object.get("zigAnalyzer") orelse value,
+        else => value,
+    };
+
+    var cfg: UnresolvedConfig = std.json.parseFromValueLeaky(UnresolvedConfig, arena, root, .{
+        .ignore_unknown_fields = true,
+    }) catch .{};
+
+    const section = std.json.parseFromValueLeaky(ZigAnalyzerSection, arena, root, .{
+        .ignore_unknown_fields = true,
+    }) catch return error.ParseError;
+    applyZigAnalyzerSection(section, &cfg);
+    return cfg;
+}
 
 /// A packed struct where every field name is copied from `Config` but the field type is `bool`.
 pub const DidConfigChange = @Struct(

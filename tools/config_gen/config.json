@@ -2,176 +2,182 @@
     "options": [
         {
             "name": "enable_snippets",
-            "description": "Enables snippet completions when the client also supports them",
+            "description": "Enables snippet completions when the client also supports them.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "enableSnippets"
         },
         {
             "name": "enable_argument_placeholders",
-            "description": "Whether to enable function argument placeholder completions",
+            "description": "Whether to enable function argument placeholder completions.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "enableArgumentPlaceholders"
         },
         {
             "name": "completion_label_details",
-            "description": "Whether to show the function signature in completion results. May improve readability in some editors when disabled",
+            "description": "Whether to show the function signature in completion results. May improve readability in some editors when disabled.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "completionLabelDetails"
         },
         {
             "name": "enable_build_on_save",
-            "description": "Whether to enable build-on-save diagnostics. Will be automatically enabled if the `build.zig` has declared a 'check' step.\n\nFor more infromation, checkout the [Build-On-Save](https://zigtools.org/zls/guides/build-on-save/) Guide.",
+            "description": "Whether to enable build-on-save diagnostics. When unset, enabled automatically if `build.zig` declares a `check` step.",
             "type": "?bool",
-            "default": null
+            "default": null,
+            "vscode": "buildOnSave.enable"
         },
         {
             "name": "build_on_save_args",
-            "description": "Specify which arguments should be passed to Zig when running build-on-save.\n\nIf the `build.zig` has declared a 'check' step, it will be preferred over the default 'install' step.",
+            "description": "Extra arguments passed to `zig build` for build-on-save. If `build.zig` declares a `check` step, that step is preferred over `install`.",
             "type": "[]const []const u8",
-            "default": []
+            "default": [],
+            "vscode": "buildOnSave.args"
         },
         {
             "name": "semantic_tokens",
-            "description": "Set level of semantic tokens. `partial` only includes information that requires semantic analysis.",
+            "description": "Semantic token detail level. `partial` only includes information that requires semantic analysis.",
             "type": "enum",
             "enum": [
                 "none",
                 "partial",
                 "full"
             ],
-            "default": "full"
+            "default": "full",
+            "vscode": "semanticTokens"
         },
         {
             "name": "inlay_hints_show_variable_type_hints",
-            "description": "Enable inlay hints for variable types",
+            "description": "Show inferred-type inlay hints for const/var declarations.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "inlayHints.types"
         },
         {
             "name": "inlay_hints_show_struct_literal_field_type",
-            "description": "Enable inlay hints for fields in struct and union literals",
+            "description": "Show inlay hints for fields in struct and union literals.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "inlayHints.structLiteralFieldType"
         },
         {
             "name": "inlay_hints_show_parameter_name",
-            "description": "Enable inlay hints for parameter names",
+            "description": "Show parameter-name inlay hints at call sites.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "inlayHints.parameterNames"
         },
         {
             "name": "inlay_hints_show_builtin",
-            "description": "Enable inlay hints for builtin functions",
+            "description": "Show inlay hints for builtin functions.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "inlayHints.builtins"
         },
         {
             "name": "inlay_hints_exclude_single_argument",
-            "description": "Don't show inlay hints for single argument calls",
+            "description": "Omit parameter-name inlay hints for calls with exactly one argument.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "inlayHints.excludeSingleArgument"
         },
         {
             "name": "inlay_hints_hide_redundant_param_names",
-            "description": "Hides inlay hints when parameter name matches the identifier (e.g. `foo: foo`)",
+            "description": "Hide inlay hints when the parameter name matches the identifier (e.g. `foo: foo`).",
             "type": "bool",
-            "default": false
+            "default": false,
+            "vscode": "inlayHints.hideRedundantParamNames"
         },
         {
             "name": "inlay_hints_hide_redundant_param_names_last_token",
-            "description": "Hides inlay hints when parameter name matches the last token of a parameter node (e.g. `foo: bar.foo`, `foo: &foo`)",
+            "description": "Hide inlay hints when the parameter name matches the last token of a parameter node (e.g. `foo: bar.foo`).",
             "type": "bool",
-            "default": false
-        },
-        {
-            "name": "force_autofix",
-            "description": "Work around editors that do not support 'source.fixall' code actions on save. This option may delivered a substandard user experience. Please refer to the installation guide to see which editors natively support code actions on save.",
-            "type": "bool",
-            "default": false
+            "default": false,
+            "vscode": "inlayHints.hideRedundantParamNamesLastToken"
         },
         {
             "name": "enable_formatting",
             "description": "Whether the language server provides document formatting. When disabled, Format Document is a no-op from the server.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "formatter.enable"
         },
         {
             "name": "formatter_command",
-            "description": "Executable of a stdin/stdout formatter. When unset, the built-in formatter (matching `zig fmt`) is used. The command must read the entire document from stdin and write the fully formatted result to stdout.",
+            "description": "Executable of a stdin/stdout formatter. When unset, the built-in formatter (matching `zig fmt`) is used. Must read the entire document from stdin and write the fully formatted result to stdout.",
             "type": "?[]const u8",
-            "default": null
+            "default": null,
+            "vscode": "formatter.command",
+            "vscode_scope": "machine-overridable"
         },
         {
             "name": "formatter_args",
             "description": "Arguments passed to `formatter_command`. For `zig fmt`, use `[\"fmt\", \"--stdin\"]`. Ignored when `formatter_command` is unset.",
             "type": "[]const []const u8",
-            "default": []
+            "default": [],
+            "vscode": "formatter.args"
         },
         {
             "name": "enable_reference_code_lenses",
             "description": "Show reference counts as code lenses on declarations within the build-graph compilation unit.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "referenceCodeLenses"
         },
         {
             "name": "enable_unused_decl_diagnostics",
             "description": "Report unused private declarations as faded (Unnecessary) diagnostics. Public declarations are never reported.",
             "type": "bool",
-            "default": true
-        },
-        {
-            "name": "warn_style",
-            "description": "Enables warnings for style guideline mismatches",
-            "type": "bool",
-            "default": false
-        },
-        {
-            "name": "highlight_global_var_declarations",
-            "description": "Whether to highlight global var declarations",
-            "type": "bool",
-            "default": false
-        },
-        {
-            "name": "skip_std_references",
-            "description": "No longer used. May be brought back to configure how symbol references in the standard library should behave",
-            "type": "bool",
-            "default": false
+            "default": true,
+            "vscode": "unusedDeclDiagnostics"
         },
         {
             "name": "prefer_ast_check_as_child_process",
-            "description": "Favor using `zig ast-check` instead of the builtin one",
+            "description": "Prefer running `zig ast-check` as a child process instead of the built-in AstGen path.",
             "type": "bool",
-            "default": true
+            "default": true,
+            "vscode": "preferAstCheckAsChildProcess"
         },
         {
             "name": "builtin_path",
-            "description": "Override the path to 'builtin' module. Automatically resolved if unset.",
+            "description": "Override the path to the `builtin` module. Automatically resolved if unset.",
             "type": "?[]const u8",
-            "default": null
+            "default": null,
+            "vscode": "builtinPath",
+            "vscode_scope": "machine-overridable"
         },
         {
             "name": "zig_lib_path",
-            "description": "Override the Zig library path. Will be automatically resolved using the 'zig_exe_path'.",
+            "description": "Override the Zig library path. Automatically resolved from `zig_exe_path` when unset.",
             "type": "?[]const u8",
-            "default": null
+            "default": null,
+            "vscode": "libPath",
+            "vscode_scope": "machine-overridable"
         },
         {
             "name": "zig_exe_path",
-            "description": "Specify the path to the Zig executable (not the directory). If unset, zig is looked up in `PATH`. e.g. `/path/to/zig-templeos-armless-1.0.0/zig`.",
+            "description": "Path to the Zig executable (not the directory). If unset, `zig` is looked up in `PATH`.",
             "type": "?[]const u8",
-            "default": null
+            "default": null,
+            "vscode": "zigPath",
+            "vscode_scope": "machine-overridable"
         },
         {
             "name": "build_runner_path",
-            "description": "Specify a custom build runner to resolve build system information.",
+            "description": "Custom build runner used to resolve build system information.",
             "type": "?[]const u8",
-            "default": null
+            "default": null,
+            "vscode": "buildRunnerPath",
+            "vscode_scope": "machine-overridable"
         },
         {
             "name": "global_cache_path",
-            "description": "Path to a directory that will be used as zig's cache. Will default to `${KnownFolders.Cache}/zls`.",
+            "description": "Directory used as Zig's cache. Defaults to `${KnownFolders.Cache}/zig-analyzer`.",
             "type": "?[]const u8",
-            "default": null
+            "default": null,
+            "vscode": "globalCachePath",
+            "vscode_scope": "machine-overridable"
         }
     ]
 }

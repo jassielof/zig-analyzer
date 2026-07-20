@@ -10,7 +10,6 @@ const DocumentStore = @import("../DocumentStore.zig");
 const lsp = @import("lsp");
 const types = lsp.types;
 const Analyser = @import("../analysis.zig");
-const ast = @import("../ast.zig");
 const offsets = @import("../offsets.zig");
 const Uri = @import("../Uri.zig");
 const code_actions = @import("code_actions.zig");
@@ -62,14 +61,6 @@ pub fn generateDiagnostics(
             var analyser = server.initAnalyser(arena, handle);
             defer analyser.deinit();
             try code_actions.collectAutoDiscardDiagnostics(&analyser, handle, arena, &diagnostics, server.offset_encoding);
-        }
-
-        if (config.warn_style and handle.tree.mode == .zig) {
-            try collectWarnStyleDiagnostics(&handle.tree, arena, &diagnostics, server.offset_encoding);
-        }
-
-        if (config.highlight_global_var_declarations and handle.tree.mode == .zig) {
-            try collectGlobalVarDiagnostics(&handle.tree, arena, &diagnostics, server.offset_encoding);
         }
 
         if (config.enable_unused_decl_diagnostics and handle.tree.mode == .zig and handle.tree.errors.len == 0) {
@@ -153,130 +144,6 @@ fn errorBundleSourceLocationFromToken(
     });
 }
 
-fn collectWarnStyleDiagnostics(
-    tree: *const Ast,
-    arena: std.mem.Allocator,
-    diagnostics: *std.ArrayList(types.Diagnostic),
-    offset_encoding: offsets.Encoding,
-) error{OutOfMemory}!void {
-    for (0..tree.nodes.len) |i| {
-        const node: Ast.Node.Index = @enumFromInt(i);
-        if (ast.isBuiltinCall(tree, node)) {
-            const builtin_token = tree.nodeMainToken(node);
-            const call_name = tree.tokenSlice(builtin_token);
-
-            if (!std.mem.eql(u8, call_name, "@import")) continue;
-
-            var buffer: [2]Ast.Node.Index = undefined;
-            const params = tree.builtinCallParams(&buffer, node).?;
-
-            if (params.len != 1) continue;
-
-            const import_str_token = tree.nodeMainToken(params[0]);
-            const import_str = tree.tokenSlice(import_str_token);
-
-            if (std.mem.startsWith(u8, import_str, "\"./")) {
-                try diagnostics.append(arena, .{
-                    .range = offsets.tokenToRange(tree, import_str_token, offset_encoding),
-                    .severity = .Hint,
-                    .code = .{ .string = "dot_slash_import" },
-                    .source = "zls",
-                    .message = "A ./ is not needed in imports",
-                });
-            }
-        }
-    }
-
-    // TODO: style warnings for types, values and declarations below root scope
-    if (tree.errors.len == 0) {
-        for (tree.rootDecls()) |decl_idx| {
-            const decl = tree.nodeTag(decl_idx);
-            switch (decl) {
-                .fn_proto,
-                .fn_proto_multi,
-                .fn_proto_one,
-                .fn_proto_simple,
-                .fn_decl,
-                => blk: {
-                    var buf: [1]Ast.Node.Index = undefined;
-                    const func = tree.fullFnProto(&buf, decl_idx).?;
-                    if (func.extern_export_inline_token != null) break :blk;
-
-                    if (func.name_token) |name_token| {
-                        const is_type_function = Analyser.isTypeFunction(tree, func);
-
-                        const func_name = tree.tokenSlice(name_token);
-                        if (!is_type_function and !isCamelCase(func_name)) {
-                            try diagnostics.append(arena, .{
-                                .range = offsets.tokenToRange(tree, name_token, offset_encoding),
-                                .severity = .Hint,
-                                .code = .{ .string = "bad_style" },
-                                .source = "zls",
-                                .message = "Functions should be camelCase",
-                            });
-                        } else if (is_type_function and !isPascalCase(func_name)) {
-                            try diagnostics.append(arena, .{
-                                .range = offsets.tokenToRange(tree, name_token, offset_encoding),
-                                .severity = .Hint,
-                                .code = .{ .string = "bad_style" },
-                                .source = "zls",
-                                .message = "Type functions should be PascalCase",
-                            });
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-    }
-}
-
-fn isCamelCase(name: []const u8) bool {
-    return !std.ascii.isUpper(name[0]) and !isSnakeCase(name);
-}
-
-fn isPascalCase(name: []const u8) bool {
-    return std.ascii.isUpper(name[0]) and !isSnakeCase(name);
-}
-
-fn isSnakeCase(name: []const u8) bool {
-    return std.mem.find(u8, name, "_") != null;
-}
-
-fn collectGlobalVarDiagnostics(
-    tree: *const Ast,
-    arena: std.mem.Allocator,
-    diagnostics: *std.ArrayList(types.Diagnostic),
-    offset_encoding: offsets.Encoding,
-) error{OutOfMemory}!void {
-    for (tree.rootDecls()) |decl| {
-        const decl_tag = tree.nodeTag(decl);
-        const decl_main_token = tree.nodeMainToken(decl);
-
-        switch (decl_tag) {
-            .simple_var_decl,
-            .aligned_var_decl,
-            .local_var_decl,
-            .global_var_decl,
-            => {
-                if (tree.tokenTag(tree.nodeMainToken(decl)) != .keyword_var) continue; // skip anything immutable
-                // uncomment this to get a list :)
-                //log.debug("possible global variable \"{s}\"", .{tree.tokenSlice(decl_main_token + 1)});
-                try diagnostics.append(arena, .{
-                    .range = offsets.tokenToRange(tree, decl_main_token, offset_encoding),
-                    .severity = .Hint,
-                    .code = .{ .string = "highlight_global_var_declarations" },
-                    .source = "zls",
-                    .message = "Global var declaration",
-                });
-            },
-            else => {},
-        }
-    }
-}
-
-/// Dim unused *private* container-level declarations. Public declarations are
-/// left alone — they form the module API and may be used from outside this file.
 fn collectUnusedDeclDiagnostics(
     analyser: *Analyser,
     handle: *DocumentStore.Handle,
@@ -329,7 +196,7 @@ fn collectUnusedDeclDiagnostics(
             .range = offsets.tokenToRange(tree, decl.nameToken(), offset_encoding),
             .severity = .Hint,
             .code = .{ .string = "unused_decl" },
-            .source = "zls",
+            .source = "zig-analyzer",
             .message = try std.fmt.allocPrint(arena, "unused {s}", .{name}),
             .tags = &.{.Unnecessary},
         });

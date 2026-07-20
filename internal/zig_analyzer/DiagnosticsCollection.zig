@@ -30,7 +30,7 @@ const DiagnosticsCollection = @This();
 pub const Tag = enum(u32) {
     /// - `std.zig.Ast.parse`
     /// - ast-check
-    /// - warn_style
+    /// - unused private decl diagnostics
     parse,
     /// errors from `@cImport`
     cimport,
@@ -392,7 +392,7 @@ fn convertErrorBundleToLSPDiangostics(
         try diagnostics.append(arena, .{
             .range = src_range,
             .severity = .Error,
-            .source = "zls",
+            .source = "zig-analyzer",
             .message = message,
             .tags = if (tags.items.len != 0) tags.items else null,
             .relatedInformation = relatedInformation,

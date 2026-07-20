@@ -1,4 +1,4 @@
-// Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) rather than auto-downloaded/managed; see project plan §5.
+// Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) with a PATH fallback to `zig-analyzer`.
 
 import { execFile } from "node:child_process";
 import * as path from "node:path";
@@ -55,21 +55,11 @@ export function activate(context: vscode.ExtensionContext): void {
       (filePath: string) => executeRunFile(filePath),
     ),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (
-        e.affectsConfiguration("zigAnalyzer.formatter") ||
-        e.affectsConfiguration("zigAnalyzer.zigPath") ||
-        e.affectsConfiguration("zigAnalyzer.inlayHints")
-      ) {
-        void client?.sendNotification("workspace/didChangeConfiguration", {
-          settings: {
-            formatter: getFormatterConfig(),
-            zigPath: getZigPath(),
-            inlayHints: getInlayHintsConfig(),
-          },
-        });
-      }
       if (e.affectsConfiguration("zigAnalyzer.zigPath")) {
         zonCodeLensProvider?.refresh(); // the cached global package cache dir came from the old zigPath
+      }
+      if (e.affectsConfiguration("zigAnalyzer.serverPath")) {
+        void restart();
       }
     }),
   );
@@ -83,9 +73,6 @@ export function deactivate(): Thenable<void> | undefined {
 
 async function start(): Promise<void> {
   const serverPath = getServerPath();
-  if (!serverPath) {
-    return;
-  }
 
   const serverOptions: ServerOptions = {
     command: serverPath,
@@ -95,13 +82,10 @@ async function start(): Promise<void> {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "zig" }],
     synchronize: {
+      configurationSection: "zigAnalyzer",
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.zig"),
     },
-    initializationOptions: {
-      formatter: getFormatterConfig(),
-      zigPath: getZigPath(),
-      inlayHints: getInlayHintsConfig(),
-    },
+    initializationOptions: getZigAnalyzerSettings(),
   };
 
   client = new LanguageClient(
@@ -111,7 +95,14 @@ async function start(): Promise<void> {
     clientOptions,
   );
 
-  await client.start();
+  try {
+    await client.start();
+  } catch (err) {
+    void vscode.window.showErrorMessage(
+      `Zig Analyzer: failed to start language server ("${serverPath}"). Set zigAnalyzer.serverPath or install zig-analyzer on PATH. ${String(err)}`,
+    );
+    client = undefined;
+  }
 }
 
 async function restart(): Promise<void> {
@@ -120,41 +111,13 @@ async function restart(): Promise<void> {
   await start();
 }
 
-// TODO: It should try by default to look for the zig-analyzer binary in the PATH.
-function getServerPath(): string | undefined {
+/// Prefer the configured path; otherwise spawn `zig-analyzer` from PATH.
+function getServerPath(): string {
   const configured = vscode.workspace
     .getConfiguration("zigAnalyzer")
-    .get<string>("serverPath", "");
-
-  if (!configured) {
-    void vscode.window.showWarningMessage(
-      'Zig Analyzer: set "zigAnalyzer.serverPath" to the zig-analyzer executable to enable language features.',
-    );
-    return undefined;
-  }
-  return configured;
-}
-
-interface FormatterConfig {
-  enable: boolean;
-  command: string;
-  args: string[];
-}
-
-/// Sent to the server as both `initialize`'s `initializationOptions` and
-/// `workspace/didChangeConfiguration`'s `settings` (see
-/// `Server.applyFrontendOptions`). The configured command must
-/// behave like `zig fmt --stdin`: read the whole document from stdin,
-/// write the fully formatted result to stdout, exit 0 on success.
-function getFormatterConfig(): FormatterConfig {
-  const config = vscode.workspace.getConfiguration("zigAnalyzer");
-  const enable = config.get<boolean>("formatter.enable", true);
-  const command = config.get<string>("formatter.command", "zig") || "";
-  return {
-    enable: enable && command.length > 0,
-    command: command || "zig",
-    args: config.get<string[]>("formatter.args", ["fmt", "--stdin"]),
-  };
+    .get<string>("serverPath", "")
+    .trim();
+  return configured || "zig-analyzer";
 }
 
 function getZigPath(): string {
@@ -164,20 +127,44 @@ function getZigPath(): string {
   return configured || "zig";
 }
 
-interface InlayHintsConfig {
-  enable: boolean;
-  parameterNames: boolean;
-  excludeSingleArgument: boolean;
-  types: boolean;
-}
-
-function getInlayHintsConfig(): InlayHintsConfig {
-  const config = vscode.workspace.getConfiguration("zigAnalyzer.inlayHints");
+/// Nested `zigAnalyzer` settings sent as `initializationOptions` and mirrored by
+/// `workspace/configuration` (section `zigAnalyzer`).
+function getZigAnalyzerSettings(): Record<string, unknown> {
+  const c = vscode.workspace.getConfiguration("zigAnalyzer");
   return {
-    enable: config.get<boolean>("enable", true),
-    parameterNames: config.get<boolean>("parameterNames", true),
-    excludeSingleArgument: config.get<boolean>("excludeSingleArgument", true),
-    types: config.get<boolean>("types", true),
+    enableSnippets: c.get("enableSnippets"),
+    enableArgumentPlaceholders: c.get("enableArgumentPlaceholders"),
+    completionLabelDetails: c.get("completionLabelDetails"),
+    buildOnSave: {
+      enable: c.get("buildOnSave.enable"),
+      args: c.get("buildOnSave.args"),
+    },
+    semanticTokens: c.get("semanticTokens"),
+    inlayHints: {
+      enable: c.get("inlayHints.enable"),
+      types: c.get("inlayHints.types"),
+      structLiteralFieldType: c.get("inlayHints.structLiteralFieldType"),
+      parameterNames: c.get("inlayHints.parameterNames"),
+      builtins: c.get("inlayHints.builtins"),
+      excludeSingleArgument: c.get("inlayHints.excludeSingleArgument"),
+      hideRedundantParamNames: c.get("inlayHints.hideRedundantParamNames"),
+      hideRedundantParamNamesLastToken: c.get(
+        "inlayHints.hideRedundantParamNamesLastToken",
+      ),
+    },
+    formatter: {
+      enable: c.get("formatter.enable"),
+      command: c.get("formatter.command"),
+      args: c.get("formatter.args"),
+    },
+    referenceCodeLenses: c.get("referenceCodeLenses"),
+    unusedDeclDiagnostics: c.get("unusedDeclDiagnostics"),
+    preferAstCheckAsChildProcess: c.get("preferAstCheckAsChildProcess"),
+    builtinPath: c.get("builtinPath"),
+    libPath: c.get("libPath"),
+    zigPath: c.get("zigPath"),
+    buildRunnerPath: c.get("buildRunnerPath"),
+    globalCachePath: c.get("globalCachePath"),
   };
 }
 

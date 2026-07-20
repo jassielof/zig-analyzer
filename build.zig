@@ -96,8 +96,15 @@ pub fn build(b: *std.Build) !void {
             gen_cmd.addArg("--generate-config");
             update_source.addCopyFileToSource(gen_cmd.addOutputFileArg("Config.zig"), "internal/zig_analyzer/Config.zig");
             gen_cmd.addArg("--generate-schema");
-            update_source.addCopyFileToSource(gen_cmd.addOutputFileArg("schema.json"), "schemas/zls.schema.json");
+            update_source.addCopyFileToSource(gen_cmd.addOutputFileArg("schema.json"), "schemas/zig-analyzer.schema.json");
+            gen_cmd.addArg("--generate-vscode-config");
+            update_source.addCopyFileToSource(gen_cmd.addOutputFileArg("vscode-configuration.json"), "schemas/vscode-configuration.json");
             gen_step.dependOn(&update_source.step);
+
+            const merge_pkg = b.addSystemCommand(&.{ "node", "tools/config_gen/merge_package_json.mjs" });
+            merge_pkg.setName("merge package.json settings");
+            merge_pkg.step.dependOn(&update_source.step);
+            gen_step.dependOn(&merge_pkg.step);
         }
     }
 

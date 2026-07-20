@@ -261,54 +261,6 @@ pub fn initAnalyser(server: *Server, arena: std.mem.Allocator, handle: ?*Documen
     );
 }
 
-/// If `force_autofix` is enabled, implement autofix without relying on a `source.fixall` code action.
-pub fn autofixWorkaround(server: *Server) enum {
-    /// Autofix is implemented using `textDocument/willSaveWaitUntil`.
-    will_save_wait_until,
-    /// Autofix is implemented by send a `workspace/applyEdit` request after receiving a `textDocument/didSave` notification.
-    on_save,
-    /// No workaround implementation of autofix is possible.
-    unavailable,
-    /// The `force_autofix` config option is disabled.
-    none,
-} {
-    if (!server.config_manager.config.force_autofix) return .none;
-    if (server.client_capabilities.supports_will_save_wait_until) return .will_save_wait_until;
-    if (server.client_capabilities.supports_apply_edits) return .on_save;
-    return .unavailable;
-}
-
-/// caller owns returned memory.
-fn autofix(server: *Server, arena: std.mem.Allocator, handle: *DocumentStore.Handle) error{ Canceled, OutOfMemory }!std.ArrayList(types.TextEdit) {
-    if (handle.tree.errors.len != 0) return .empty;
-    if (handle.tree.mode == .zon) return .empty;
-
-    var error_bundle = try diagnostics_gen.getAstCheckDiagnostics(server, handle);
-    defer error_bundle.deinit(server.allocator);
-    if (error_bundle.errorMessageCount() == 0) return .empty;
-
-    var analyser = server.initAnalyser(arena, handle);
-    defer analyser.deinit();
-
-    var builder: code_actions.Builder = .{
-        .arena = arena,
-        .analyser = &analyser,
-        .handle = handle,
-        .offset_encoding = server.offset_encoding,
-        .only_kinds = .init(.{
-            .@"source.fixAll" = true,
-        }),
-    };
-
-    try builder.generateCodeAction(error_bundle);
-    for (builder.actions.items) |action| {
-        std.debug.assert(action.kind.?.eql(.@"source.fixAll")); // We request only source.fixall code actions
-    }
-
-    defer builder.fixall_text_edits = .empty;
-    return builder.fixall_text_edits;
-}
-
 fn generateDiagnostics(server: *Server, handle: *DocumentStore.Handle) void {
     if (!server.client_capabilities.supports_publish_diagnostics) return;
     const do = struct {
@@ -486,17 +438,11 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
     }
 
     if (request.initializationOptions) |initialization_options| {
-        if (std.json.parseFromValueLeaky(configuration.UnresolvedConfig, arena, initialization_options, .{
-            .ignore_unknown_fields = true,
-        })) |*new_cfg| {
-            try server.config_manager.setConfiguration(.lsp_initialization, new_cfg);
+        if (configuration.parseClientConfiguration(arena, initialization_options)) |new_cfg| {
+            try server.config_manager.setConfiguration(.lsp_initialization, &new_cfg);
         } else |err| {
             log.err("failed to read initialization_options: {}", .{err});
         }
-
-        var frontend_cfg: configuration.UnresolvedConfig = .{};
-        overlayFrontendOptions(arena, initialization_options, &frontend_cfg);
-        try server.config_manager.setConfiguration(.client_push, &frontend_cfg);
 
         if (!server.client_capabilities.supports_configuration) {
             try server.resolveConfiguration();
@@ -506,7 +452,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
 
     return .{
         .serverInfo = .{
-            .name = "zls",
+            .name = "zig-analyzer",
             .version = build_options.version_string,
         },
         .capabilities = .{
@@ -524,7 +470,7 @@ fn initializeHandler(server: *Server, arena: std.mem.Allocator, request: types.I
                     .openClose = true,
                     .change = .Incremental,
                     .save = .{ .bool = true },
-                    .willSaveWaitUntil = true,
+                    .willSaveWaitUntil = false,
                 },
             },
             .renameProvider = .{
@@ -655,7 +601,7 @@ fn registerCapability(server: *Server, method: []const u8, registersOptions: ?ty
 fn requestConfiguration(server: *Server) Error!void {
     const configuration_items: [1]types.workspace.configuration.Item = .{
         .{
-            .section = "zls",
+            .section = "zigAnalyzer",
             .scopeUri = if (server.workspaces.items.len == 1) server.workspaces.items[0].uri.raw else null,
         },
     };
@@ -700,12 +646,7 @@ fn handleConfiguration(server: *Server, json: std.json.Value) error{ Canceled, O
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    var new_config = std.json.parseFromValueLeaky(
-        configuration.UnresolvedConfig,
-        arena,
-        result,
-        .{ .ignore_unknown_fields = true },
-    ) catch |err| {
+    var new_config = configuration.parseClientConfiguration(arena, result) catch |err| {
         log.err("Failed to parse response from 'workspace/configuration': {}", .{err});
         try server.resolveConfiguration();
         return;
@@ -930,115 +871,31 @@ fn didChangeConfigurationHandler(server: *Server, arena: std.mem.Allocator, noti
                 server.client_capabilities.supports_workspace_did_change_configuration_dynamic_registration)
             {
                 // The client has informed us that the configuration options have
-                // changed. The will request them with `workspace/configuration`.
+                // changed. We will request them with `workspace/configuration`.
                 try server.requestConfiguration();
             }
             return;
         },
         .object => |object| blk: {
-            // Always apply nested frontend options (formatter, zigPath, …) from
-            // the push notification — the VS Code extension sends them this way
-            // rather than under a flat `zls` / `workspace/configuration` section.
-            var frontend_cfg: configuration.UnresolvedConfig = .{};
-            overlayFrontendOptions(arena, notification.settings, &frontend_cfg);
-            const has_frontend =
-                frontend_cfg.enable_formatting != null or
-                frontend_cfg.formatter_command != null or
-                frontend_cfg.formatter_args != null or
-                frontend_cfg.zig_exe_path != null or
-                frontend_cfg.inlay_hints_show_variable_type_hints != null or
-                frontend_cfg.inlay_hints_show_parameter_name != null or
-                frontend_cfg.inlay_hints_exclude_single_argument != null;
-            if (has_frontend) {
-                try server.config_manager.setConfiguration(.client_push, &frontend_cfg);
-                try server.resolveConfiguration();
-            }
-
             if (server.client_capabilities.supports_configuration and
                 server.client_capabilities.supports_workspace_did_change_configuration_dynamic_registration)
             {
-                log.debug("Ignoring flat 'workspace/didChangeConfiguration' config in favor of 'workspace/configuration'", .{});
+                log.debug("Ignoring 'workspace/didChangeConfiguration' payload in favor of 'workspace/configuration'", .{});
                 try server.requestConfiguration();
                 return;
             }
-            break :blk object.get("zls") orelse notification.settings;
+            break :blk object.get("zigAnalyzer") orelse notification.settings;
         },
         else => notification.settings, // We will definitely fail to parse this
     };
 
-    const new_config = std.json.parseFromValueLeaky(
-        configuration.UnresolvedConfig,
-        arena,
-        settings,
-        .{ .ignore_unknown_fields = true },
-    ) catch |err| {
+    const new_config = configuration.parseClientConfiguration(arena, settings) catch |err| {
         log.err("failed to parse 'workspace/didChangeConfiguration' response: {}", .{err});
         return error.ParseError;
     };
 
     try server.config_manager.setConfiguration(.lsp_configuration, &new_config);
     try server.resolveConfiguration();
-}
-
-/// Nested options sent by the zig-analyzer VS Code extension (and similar clients)
-/// that are not flat `Config` fields.
-const FrontendOptions = struct {
-    formatter: ?struct {
-        command: ?[]const u8 = null,
-        args: ?[]const []const u8 = null,
-        enable: ?bool = null,
-    } = null,
-    zigPath: ?[]const u8 = null,
-    inlayHints: ?struct {
-        enable: ?bool = null,
-        parameterNames: ?bool = null,
-        excludeSingleArgument: ?bool = null,
-        types: ?bool = null,
-    } = null,
-};
-
-fn overlayFrontendOptions(
-    arena: std.mem.Allocator,
-    value: std.json.Value,
-    cfg: *configuration.UnresolvedConfig,
-) void {
-    const opts = std.json.parseFromValueLeaky(FrontendOptions, arena, value, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| {
-        log.err("failed to parse frontend options: {}", .{err});
-        return;
-    };
-
-    if (opts.formatter) |formatter| {
-        if (formatter.enable) |enable| cfg.enable_formatting = enable;
-        if (formatter.command) |command| {
-            if (command.len == 0) {
-                cfg.enable_formatting = false;
-                cfg.formatter_command = null;
-            } else {
-                cfg.formatter_command = command;
-            }
-        }
-        if (formatter.args) |args| cfg.formatter_args = args;
-    }
-
-    if (opts.zigPath) |zig_path| {
-        if (zig_path.len != 0) cfg.zig_exe_path = zig_path;
-    }
-
-    if (opts.inlayHints) |hints| {
-        // `enable: false` turns off all inlay hint categories.
-        if (hints.enable) |enable| {
-            if (!enable) {
-                cfg.inlay_hints_show_variable_type_hints = false;
-                cfg.inlay_hints_show_parameter_name = false;
-                cfg.inlay_hints_show_struct_literal_field_type = false;
-            }
-        }
-        if (hints.parameterNames) |v| cfg.inlay_hints_show_parameter_name = v;
-        if (hints.excludeSingleArgument) |v| cfg.inlay_hints_exclude_single_argument = v;
-        if (hints.types) |v| cfg.inlay_hints_show_variable_type_hints = v;
-    }
 }
 
 pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void {
@@ -1063,7 +920,6 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
     const new_build_runner_path: bool = result.did_change.build_runner_path;
     const new_enable_build_on_save: bool = result.did_change.enable_build_on_save;
     const new_build_on_save_args: bool = result.did_change.build_on_save_args;
-    const new_force_autofix: bool = result.did_change.force_autofix;
 
     server.document_store.config = createDocumentStoreConfig(server.config_manager);
 
@@ -1168,7 +1024,7 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
     if (server.config_manager.config.enable_build_on_save orelse false) {
         if (!BuildOnSaveSupport.isSupportedComptime()) {
             // This message is not very helpful but it relatively uncommon to happen anyway.
-            log.info("'enable_build_on_save' is ignored because build on save is not supported by this ZLS build", .{});
+            log.info("'enable_build_on_save' is ignored because build on save is not supported by this zig-analyzer build", .{});
         } else if (server.status == .initialized and (server.config_manager.config.zig_exe_path == null or server.config_manager.zig_lib_dir == null)) {
             log.warn("'enable_build_on_save' is ignored because Zig could not be found", .{});
         } else if (!server.client_capabilities.supports_publish_diagnostics) {
@@ -1183,18 +1039,6 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
                 .unsupported_zig_version => log.warn("Build-On-Save cannot run in watch mode because it is not supported on {t} by Zig {f} (requires at least {f})", .{ zig_builtin.os.tag, server.resolved_config.zig_runtime_version.?, BuildOnSaveSupport.minimum_zig_version }),
                 .unsupported_os => log.warn("Build-On-Save cannot run in watch mode because it is not supported on {t}", .{zig_builtin.os.tag}),
             }
-        }
-    }
-
-    if (new_force_autofix) {
-        switch (server.autofixWorkaround()) {
-            .none => {},
-            .unavailable => {
-                log.warn("`force_autofix` is ignored because it is not supported by {s}", .{server.client_capabilities.client_name orelse "your editor"});
-            },
-            .on_save, .will_save_wait_until => |workaround| {
-                log.info("Autofix workaround enabled: '{t}'", .{workaround});
-            },
         }
     }
 }
@@ -1263,24 +1107,6 @@ fn saveDocumentHandler(server: *Server, arena: std.mem.Allocator, notification: 
         server.document_store.invalidateBuildFile(document_uri);
     }
 
-    if (server.autofixWorkaround() == .on_save) {
-        const handle = server.document_store.getHandle(document_uri) orelse return;
-        var text_edits = try server.autofix(arena, handle);
-
-        var workspace_edit: types.WorkspaceEdit = .{ .changes = .{} };
-        try workspace_edit.changes.?.map.putNoClobber(arena, document_uri.raw, try text_edits.toOwnedSlice(arena));
-
-        const json_message = try server.sendToClientRequest(
-            .{ .string = "apply_edit" },
-            "workspace/applyEdit",
-            types.workspace.apply_workspace_edit.Params{
-                .label = "autofix",
-                .edit = workspace_edit,
-            },
-        );
-        server.allocator.free(json_message);
-    }
-
     if (BuildOnSaveSupport.isSupportedComptime()) {
         for (server.workspaces.items) |*workspace| {
             workspace.sendManualWatchUpdate();
@@ -1305,25 +1131,10 @@ fn closeDocumentHandler(server: *Server, arena: std.mem.Allocator, notification:
 }
 
 fn willSaveWaitUntilHandler(server: *Server, arena: std.mem.Allocator, request: types.TextDocument.WillSaveParams) Error!?[]types.TextEdit {
-    if (server.autofixWorkaround() != .will_save_wait_until) return null;
-
-    switch (request.reason) {
-        .Manual => {},
-        .AfterDelay,
-        .FocusOut,
-        => return null,
-        _ => return null,
-    }
-
-    const document_uri = Uri.parse(arena, request.textDocument.uri) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidParams,
-    };
-    const handle = server.document_store.getHandle(document_uri) orelse return null;
-
-    var text_edits = try server.autofix(arena, handle);
-
-    return try text_edits.toOwnedSlice(arena);
+    _ = server;
+    _ = arena;
+    _ = request;
+    return null;
 }
 
 fn semanticTokensFullHandler(server: *Server, arena: std.mem.Allocator, request: types.semantic_tokens.Params) Error!?types.semantic_tokens.Result {

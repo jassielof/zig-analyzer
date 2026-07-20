@@ -4,18 +4,30 @@ VS Code client for [zig-analyzer](https://github.com/jassielof/zig-analyzer), a 
 
 ## Requirements
 
-This extension is a thin LSP client — it does not bundle or download the `zig-analyzer` server binary. Build it yourself from the [zig-analyzer repository](https://github.com/jassielof/zig-analyzer) and point this extension at the resulting executable.
+This extension is a thin LSP client — it does not bundle or download the `zig-analyzer` server binary. Build it yourself from the [zig-analyzer repository](https://github.com/jassielof/zig-analyzer) and either set `zigAnalyzer.serverPath` or put `zig-analyzer` on your `PATH`.
 
 ## Extension Settings
 
-- `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable. Required — the extension does not start a language server until this is set.
-- `zigAnalyzer.zigPath`: Path to the `zig` executable, used by **Zig Analyzer: Run Build Step** (default `zig`, i.e. whatever's on `PATH`).
-- `zigAnalyzer.trace.server`: Traces communication between VS Code and the language server (`off`, `messages`, `verbose`). Useful for debugging.
-- `zigAnalyzer.formatter.command` / `zigAnalyzer.formatter.args`: Override the formatter used by "Format Document" (see [Formatting](#formatting) below).
+Settings live under the `zigAnalyzer` namespace. Client-only:
+
+- `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable. If empty, the extension looks for `zig-analyzer` on `PATH`.
+- `zigAnalyzer.trace.server`: Traces communication between VS Code and the language server (`off`, `messages`, `verbose`).
+
+LSP-mirrored settings (also understood by the server via `workspace/configuration`) include formatter, inlay hints, build-on-save, zig/lib paths, snippets, semantic tokens, reference code lenses, and unused-declaration diagnostics. See the Settings UI under **Zig Analyzer**.
+
+### Regenerating settings from the server schema
+
+Configuration options are defined once in [`tools/config_gen/config.json`](tools/config_gen/config.json). After editing that file, run:
+
+```sh
+zig build gen
+```
+
+This regenerates `internal/zig_analyzer/Config.zig`, `schemas/zig-analyzer.schema.json`, `schemas/vscode-configuration.json`, and merges the VS Code properties into `package.json`.
 
 ### Formatting
 
-By default, "Format Document" runs the configured stdin formatter (`zig fmt --stdin`). Override with:
+By default, "Format Document" uses the built-in formatter (matching `zig fmt`). To run an external stdin/stdout formatter:
 
 ```json
 {

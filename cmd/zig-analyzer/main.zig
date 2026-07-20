@@ -127,7 +127,7 @@ fn defaultLogFilePath(
     if (zig_builtin.target.os.tag == .wasi) return null;
     const cache_path = try known_folders.getPath(io, allocator, environ_map.*, .cache) orelse return null;
     defer allocator.free(cache_path);
-    return try std.Io.Dir.path.join(allocator, &.{ cache_path, "zls", "zls.log" });
+    return try std.Io.Dir.path.join(allocator, &.{ cache_path, "zig-analyzer", "zig-analyzer.log" });
 }
 
 fn createLogFile(
@@ -196,7 +196,7 @@ fn @"zls env"(
     };
     defer if (global_cache_dir) |path| allocator.free(path);
 
-    const zls_global_cache_dir = if (global_cache_dir) |cache_dir| try std.Io.Dir.path.join(allocator, &.{ cache_dir, "zls" }) else null;
+    const zls_global_cache_dir = if (global_cache_dir) |cache_dir| try std.Io.Dir.path.join(allocator, &.{ cache_dir, "zig-analyzer" }) else null;
     defer if (zls_global_cache_dir) |path| allocator.free(path);
 
     const global_config_dir = known_folders.getPath(io, allocator, environ_map.*, .global_configuration) catch |err| switch (err) {
@@ -412,7 +412,7 @@ fn loadConfiguration(
         };
         defer allocator.free(cache_dir_path);
 
-        config.global_cache_path = try std.Io.Dir.path.join(config_arena.allocator(), &.{ cache_dir_path, "zls" });
+        config.global_cache_path = try std.Io.Dir.path.join(config_arena.allocator(), &.{ cache_dir_path, "zig-analyzer" });
     }
 
     try server.config_manager.setConfiguration2(.frontend, &config);
