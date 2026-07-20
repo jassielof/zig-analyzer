@@ -64,6 +64,8 @@ const Builder = struct {
     local_only_decl: bool,
     /// Whether the `target_symbol` has been added
     did_add_target_symbol: bool = false,
+    /// Whether aliases should resolve to their target while matching references.
+    resolve_aliases: bool,
     analyser: *Analyser,
     encoding: offsets.Encoding,
 
@@ -101,7 +103,7 @@ const Builder = struct {
             builder.target_symbol.nameToken(),
         );
 
-        const candidate: Analyser.DeclWithHandle, const name_token = candidate: switch (tree.nodeTag(node)) {
+        var candidate: Analyser.DeclWithHandle, const name_token = candidate: switch (tree.nodeTag(node)) {
             .identifier,
             .test_decl,
             => |tag| {
@@ -229,28 +231,39 @@ const Builder = struct {
             else => return,
         };
 
-        // Match the exact declaration binding — do not follow `const alias = other`
-        // through to `other`. Otherwise a lens/refs query on a local alias like
-        // `const types = lsp.types` reports 0 hits (usages resolve to `lsp.types`
-        // and no longer equal the alias), while Find All References that *does*
-        // follow aliases incorrectly also counts the `lsp.types` field access.
+        if (builder.resolve_aliases) {
+            candidate = try builder.analyser.resolveVarDeclAlias(candidate) orelse candidate;
+        }
+
         if (builder.target_symbol.eql(candidate)) {
             try builder.add(handle, name_token);
         }
     }
 };
 
+const AliasResolution = enum { request_default, never };
+
 fn symbolReferences(
     analyser: *Analyser,
     request: GeneralReferencesRequest,
-    target_symbol: Analyser.DeclWithHandle,
+    root_symbol: Analyser.DeclWithHandle,
     encoding: offsets.Encoding,
-    /// add `target_symbol` as a references
+    /// `types.reference.Context.includeDeclaration`
     include_decl: bool,
     /// The file on which the request was initiated.
     current_handle: *DocumentStore.Handle,
+    alias_resolution: AliasResolution,
 ) Analyser.Error!std.ArrayList(types.Location) {
-    std.debug.assert(target_symbol.decl != .label); // use `labelReferences` instead
+    std.debug.assert(root_symbol.decl != .label); // use `labelReferences` instead
+
+    const dealiased_symbol = try analyser.resolveVarDeclAlias(root_symbol) orelse root_symbol;
+    const target_symbol, const resolve_aliases = switch (alias_resolution) {
+        .never => .{ root_symbol, false },
+        .request_default => switch (request) {
+            .highlight, .rename => .{ root_symbol, dealiased_symbol.eql(root_symbol) },
+            .references => .{ dealiased_symbol, true },
+        },
+    };
 
     const doc_scope = try target_symbol.handle.getDocumentScope();
     const source_index = target_symbol.handle.tree.tokenStart(target_symbol.nameToken());
@@ -288,6 +301,7 @@ fn symbolReferences(
         .analyser = analyser,
         .target_symbol = target_symbol,
         .local_only_decl = local_node != null,
+        .resolve_aliases = resolve_aliases,
         .encoding = encoding,
     };
 
@@ -336,6 +350,7 @@ pub fn collectSymbolReferences(
         encoding,
         false,
         current_handle,
+        .never,
     );
 }
 
@@ -756,6 +771,7 @@ pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: Gen
                 server.offset_encoding,
                 include_decl,
                 handle,
+                .request_default,
             ),
         };
     };
@@ -798,7 +814,7 @@ pub fn referencesHandler(server: *Server, arena: std.mem.Allocator, request: Gen
     }
 }
 
-test "collectSymbolReferences: local alias usages, not aliased field" {
+test "alias references resolve while rename remains on the selected binding" {
     const DiagnosticsCollection = @import("../DiagnosticsCollection.zig");
     const InternPool = @import("../analyser/InternPool.zig");
 
@@ -831,16 +847,11 @@ test "collectSymbolReferences: local alias usages, not aliased field" {
     defer ip.deinit(allocator);
 
     const source =
-        \\const Outer = struct {
-        \\    pub const Inner = struct {};
+        \\const S = struct {
+        \\    fn foo() void {}
         \\};
-        \\const types = Outer.Inner;
-        \\fn use(a: types, b: types) void {
-        \\    _ = a;
-        \\    _ = b;
-        \\    const again: types = .{};
-        \\    _ = again;
-        \\}
+        \\const foo = S.foo;
+        \\comptime foo();
     ;
 
     const uri: Uri = try .parse(allocator, "file:///test_alias_refs.zig");
@@ -849,12 +860,12 @@ test "collectSymbolReferences: local alias usages, not aliased field" {
     try store.openLspSyncedDocument(uri, source);
     const handle = store.getHandle(uri).?;
 
-    const types_node = blk: {
+    const alias_node = blk: {
         for (handle.tree.rootDecls()) |node| {
             switch (handle.tree.nodeTag(node)) {
                 .simple_var_decl, .global_var_decl, .local_var_decl, .aligned_var_decl => {
                     const name = offsets.identifierTokenToNameSlice(&handle.tree, handle.tree.fullVarDecl(node).?.ast.mut_token + 1);
-                    if (std.mem.eql(u8, name, "types")) break :blk node;
+                    if (std.mem.eql(u8, name, "foo")) break :blk node;
                 },
                 else => {},
             }
@@ -869,9 +880,44 @@ test "collectSymbolReferences: local alias usages, not aliased field" {
     var analyser: Analyser = .init(allocator, arena, &store, &ip, handle);
     defer analyser.deinit();
 
-    const decl: Analyser.DeclWithHandle = .{ .decl = .{ .ast_node = types_node }, .handle = handle };
+    const decl: Analyser.DeclWithHandle = .{ .decl = .{ .ast_node = alias_node }, .handle = handle };
     const locs = try collectSymbolReferences(&analyser, decl, handle, .@"utf-8");
 
-    // usages: `a: types`, `b: types`, `again: types` — not `Outer.Inner` and not the decl name itself
-    try std.testing.expectEqual(@as(usize, 3), locs.items.len);
+    // Code lenses operate on the direct binding, so they retain just `foo()`.
+    try std.testing.expectEqual(@as(usize, 1), locs.items.len);
+
+    const alias_name_token = handle.tree.fullVarDecl(alias_node).?.ast.mut_token + 1;
+    const position = offsets.indexToPosition(source, handle.tree.tokenStart(alias_name_token), .@"utf-8");
+
+    const rename_locs = try symbolReferences(
+        &analyser,
+        .{ .rename = .{
+            .textDocument = .{ .uri = uri.raw },
+            .position = position,
+            .newName = "renamed",
+        } },
+        decl,
+        .@"utf-8",
+        true,
+        handle,
+        .request_default,
+    );
+    // The alias declaration and its call, without `S.foo` or the declaration.
+    try std.testing.expectEqual(@as(usize, 2), rename_locs.items.len);
+
+    const reference_locs = try symbolReferences(
+        &analyser,
+        .{ .references = .{
+            .textDocument = .{ .uri = uri.raw },
+            .position = position,
+            .context = .{ .includeDeclaration = true },
+        } },
+        decl,
+        .@"utf-8",
+        true,
+        handle,
+        .request_default,
+    );
+    // References still follow the alias: declaration, alias, field access, call.
+    try std.testing.expectEqual(@as(usize, 4), reference_locs.items.len);
 }

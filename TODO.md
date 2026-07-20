@@ -2,7 +2,7 @@
 
 - [x] Configurable formatter, currently it's hardcoded to always use `zig fmt --stdin`, always, regardless if the editor has a custom formatter configured, and it doesn't respect editor settings, if I want to bring my own `docent fmt --stdin` formatter I simply can't because both the VS Code extension and the LSP hardcode it to the Zig's standard one, plus it can't be disabled. When fixing this, it should respect the editor setting, and explicit ask for a standard input formatter, not via file path.
 - [x] Reference counter, ZLS already can find references, so it should be easy to show reference counts as code lenses, this should be bounded to the build-graph compilation unit.
-- [ ] Robust refactoring for renaming declarations. I had a catastrophic experience with this, I tried to rename an allocator constant on a test file, and it renamed all of the project allocator constants, which shouldn't, it should have been bounded to the simple file as it wasn't even public, and it also renamed the allocator constant from my std. lib. breaking my whole installation and project.
+- [x] Robust refactoring for renaming declarations. I had a catastrophic experience with this, I tried to rename an allocator constant on a test file, and it renamed all of the project allocator constants, which shouldn't, it should have been bounded to the simple file as it wasn't even public, and it also renamed the allocator constant from my std. lib. breaking my whole installation and project.
 - [x] Dimmed unused declarations diagnostics, this should consider public vs. non-public (private) declarations.
 - [x] Doctests as documentation examples for declaration hover, these should be appended at the end as:
     ````
