@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) !void {
         // (including the docs URL / compiler version).
         const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{builtin.zig_version_string});
         const markitdown = b.addSystemCommand(&.{"uv"});
-        markitdown.addArgs(&.{"run", "markitdown"});
+        markitdown.addArgs(&.{ "run", "markitdown" });
         markitdown.setName("markitdown langref");
         markitdown.addArg("--output");
         const langref_md = markitdown.addOutputFileArg("langref.md");
@@ -116,6 +116,7 @@ pub fn build(b: *std.Build) !void {
     });
     lsp_build.addDocsStep(b, lsp_modules.lsp);
     b.modules.put(b.allocator, "lsp", lsp_modules.lsp) catch @panic("OOM");
+    b.modules.put(b.allocator, "json_rpc", lsp_modules.json_rpc) catch @panic("OOM");
 
     const zig_analyzer_module = zig_analyzer_build.createZigAnalyzerModule(b, .{
         .target = target,

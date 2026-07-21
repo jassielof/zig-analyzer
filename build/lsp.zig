@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const Modules = struct {
     lsp: *std.Build.Module,
+    json_rpc: *std.Build.Module,
     parser: *std.Build.Module,
     types: *std.Build.Module,
 };
@@ -30,7 +31,7 @@ pub fn runCodegen(b: *std.Build) std.Build.LazyPath {
     return lsp_types_output_file;
 }
 
-/// Builds the `lib/lsp` module graph (lsp, lsp-parser, lsp-types) for a specific target/optimize.
+/// Builds the `lib/lsp` module graph (lsp, json-rpc, lsp-parser, lsp-types) for a specific target/optimize.
 pub fn createLspModules(
     b: *std.Build,
     lsp_types_output_file: std.Build.LazyPath,
@@ -39,6 +40,12 @@ pub fn createLspModules(
         optimize: std.builtin.OptimizeMode,
     },
 ) Modules {
+    const json_rpc_module = b.createModule(.{
+        .root_source_file = b.path("lib/json_rpc/root.zig"),
+        .target = options.target,
+        .optimize = options.optimize,
+    });
+
     const lsp_parser_module = b.createModule(.{
         .root_source_file = b.path("lib/lsp/parser.zig"),
         .target = options.target,
@@ -51,6 +58,7 @@ pub fn createLspModules(
         .optimize = options.optimize,
         .imports = &.{
             .{ .name = "parser", .module = lsp_parser_module },
+            .{ .name = "json_rpc", .module = json_rpc_module },
         },
     });
 
@@ -61,10 +69,11 @@ pub fn createLspModules(
         .imports = &.{
             .{ .name = "parser", .module = lsp_parser_module },
             .{ .name = "types", .module = lsp_types_module },
+            .{ .name = "json_rpc", .module = json_rpc_module },
         },
     });
 
-    return .{ .lsp = lsp_module, .parser = lsp_parser_module, .types = lsp_types_module };
+    return .{ .lsp = lsp_module, .json_rpc = json_rpc_module, .parser = lsp_parser_module, .types = lsp_types_module };
 }
 
 /// Registers a `lsp-docs` step that generates and installs documentation for the lsp module.
@@ -93,11 +102,17 @@ pub fn addLspTests(
         .root_module = modules.lsp,
     });
 
+    const json_rpc_tests = b.addTest(.{
+        .name = "test json_rpc",
+        .root_module = modules.json_rpc,
+    });
+
     const lsp_parser_tests = b.addTest(.{
         .name = "test lsp parser",
         .root_module = modules.parser,
     });
 
     test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
+    test_step.dependOn(&b.addRunArtifact(json_rpc_tests).step);
     test_step.dependOn(&b.addRunArtifact(lsp_parser_tests).step);
 }
