@@ -7,6 +7,7 @@ const known_folders = @import("known-folders");
 
 const log = std.log.scoped(.main);
 
+// TODO: Replace this bare CLI with Fangz. As well rebrand to Zig Analyzer.
 const usage =
     \\ZLS - A non-official language server for Zig
     \\
@@ -510,6 +511,7 @@ fn parseArgs(
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main(init: std.process.Init.Minimal) !u8 {
+    // TODO: I believe there's no need to add a conditional "is debug" check, there shouldn't be a difference between a debug or release build.
     const is_debug = exe_options.debug_gpa or switch (zig_builtin.mode) {
         .Debug => true,
         .ReleaseSafe, .ReleaseFast, .ReleaseSmall => zig_builtin.single_threaded,
