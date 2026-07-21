@@ -5,6 +5,7 @@ const Ast = std.zig.Ast;
 const Token = std.zig.Token;
 
 const DocumentStore = @import("../DocumentStore.zig");
+// TODO: If a value is dimmed because of 0 references or 0 usage, a code action to remove it should be offered (safely).
 const DocumentScope = @import("../DocumentScope.zig");
 const Analyser = @import("../analysis.zig");
 const ast = @import("../ast.zig");
