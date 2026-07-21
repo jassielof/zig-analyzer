@@ -5,10 +5,10 @@ const Ast = std.zig.Ast;
 const Token = std.zig.Token;
 
 const DocumentStore = @import("../DocumentStore.zig");
-// TODO: If a value is dimmed because of 0 references or 0 usage, a code action to remove it should be offered (safely).
 const DocumentScope = @import("../DocumentScope.zig");
 const Analyser = @import("../analysis.zig");
 const ast = @import("../ast.zig");
+const references = @import("references.zig");
 const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
 
@@ -81,8 +81,10 @@ pub const Builder = struct {
     pub fn generateCodeActionsInRange(
         builder: *Builder,
         range: types.Range,
-    ) error{OutOfMemory}!void {
+    ) Analyser.Error!void {
         const tree = &builder.handle.tree;
+
+        try generateUnusedDeclRemovalCodeActions(builder, range);
 
         const source_index = offsets.positionToIndex(tree.source, range.start, builder.offset_encoding);
 
@@ -121,6 +123,88 @@ pub const Builder = struct {
         return workspace_edit;
     }
 };
+
+fn generateUnusedDeclRemovalCodeActions(
+    builder: *Builder,
+    range: types.Range,
+) Analyser.Error!void {
+    if (!builder.wantKind(.quickfix)) return;
+
+    const tree = &builder.handle.tree;
+    const requested_loc = offsets.rangeToLoc(tree.source, range, builder.offset_encoding);
+
+    for (tree.rootDecls()) |node| {
+        const decl = declFromRootNode(builder.handle, node) orelse continue;
+        if (decl.isPublic()) continue;
+
+        const name_token = decl.nameToken();
+        const name_loc = offsets.tokenToLoc(tree, name_token);
+        if (requested_loc.end < name_loc.start or name_loc.end < requested_loc.start) continue;
+
+        const name = offsets.identifierTokenToNameSlice(tree, name_token);
+        if (name.len == 0 or name[0] == '_' or std.mem.eql(u8, name, "main")) continue;
+
+        const locations = try references.collectSymbolReferences(
+            builder.analyser,
+            decl,
+            builder.handle,
+            builder.offset_encoding,
+        );
+        if (locations.items.len != 0) continue;
+
+        try builder.actions.append(builder.arena, .{
+            .title = "remove unused declaration",
+            .kind = .quickfix,
+            .isPreferred = true,
+            .edit = try builder.createWorkspaceEdit(&.{builder.createTextEditLoc(
+                getRootDeclRemovalLoc(tree, node),
+                "",
+            )}),
+        });
+    }
+}
+
+fn declFromRootNode(
+    handle: *DocumentStore.Handle,
+    node: Ast.Node.Index,
+) ?Analyser.DeclWithHandle {
+    const tree = &handle.tree;
+    switch (tree.nodeTag(node)) {
+        .global_var_decl,
+        .local_var_decl,
+        .simple_var_decl,
+        .aligned_var_decl,
+        .fn_proto,
+        .fn_proto_multi,
+        .fn_proto_one,
+        .fn_proto_simple,
+        .fn_decl,
+        => {
+            var buf: [1]Ast.Node.Index = undefined;
+            if (tree.fullFnProto(&buf, node)) |fn_proto| {
+                if (fn_proto.name_token == null) return null;
+            }
+            return .{ .decl = .{ .ast_node = node }, .handle = handle };
+        },
+        else => return null,
+    }
+}
+
+/// Includes attached doc comments, a trailing semicolon, and one line break.
+fn getRootDeclRemovalLoc(tree: *const Ast, node: Ast.Node.Index) offsets.Loc {
+    const first_token = Analyser.getDocCommentTokenIndex(tree, tree.nodeMainToken(node)) orelse tree.firstToken(node);
+    var last_token = ast.lastToken(tree, node);
+    if (last_token + 1 < tree.tokens.len and tree.tokenTag(last_token + 1) == .semicolon) {
+        last_token += 1;
+    }
+
+    var end = offsets.tokenToLoc(tree, last_token).end;
+    while (end < tree.source.len and (tree.source[end] == ' ' or tree.source[end] == '\t')) : (end += 1) {}
+    if (end < tree.source.len and tree.source[end] == '\r') end += 1;
+    if (end < tree.source.len and tree.source[end] == '\n') end += 1;
+
+    return .{ .start = tree.tokenStart(first_token), .end = end };
+}
 
 pub fn generateStringLiteralCodeActions(
     builder: *Builder,
