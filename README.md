@@ -4,13 +4,21 @@ VS Code client for [zig-analyzer](https://github.com/jassielof/zig-analyzer), a 
 
 ## Requirements
 
-This extension is a thin LSP client — it does not bundle or download the `zig-analyzer` server binary. Build it yourself from the [zig-analyzer repository](https://github.com/jassielof/zig-analyzer) and either set `zigAnalyzer.serverPath` or put `zig-analyzer` on your `PATH`.
+This extension is a thin LSP client — it does not bundle or download the `zig-analyzer` server binary. Build it yourself from the [zig-analyzer repository](https://github.com/jassielof/zig-analyzer). When your workspace contains `zig-out/bin/zig-analyzer` (or `.exe` on Windows), it is discovered automatically; otherwise set `zigAnalyzer.serverPath` or put `zig-analyzer` on your `PATH`.
 
 ## Extension Settings
 
 Settings live under the `zigAnalyzer` namespace. Client-only:
 
-- `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable. If empty, the extension looks for `zig-analyzer` on `PATH`.
+- `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable or its containing directory. `${workspaceFolder}` (including `${workspaceFolder:name}` in multi-root workspaces) is supported. If empty, the extension checks `${workspaceFolder}/zig-out/bin` before looking for `zig-analyzer` on `PATH`.
+
+For this repository, the optional setting is simply:
+
+```json
+{
+  "zigAnalyzer.serverPath": "${workspaceFolder}/zig-out/bin"
+}
+```
 - `zigAnalyzer.trace.server`: Traces communication between VS Code and the language server (`off`, `messages`, `verbose`).
 
 LSP-mirrored settings (also understood by the server via `workspace/configuration`) include formatter, inlay hints, build-on-save, zig/lib paths, snippets, semantic tokens, reference code lenses, and unused-declaration diagnostics. See the Settings UI under **Zig Analyzer**.

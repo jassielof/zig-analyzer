@@ -6,5 +6,6 @@
   "better-todo-tree.filtering.excludeGlobs": [
     "**/node_modules/*/**",
     "**/references/**/*"
-  ]
+  ],
+  "zigAnalyzer.serverPath": "${workspaceFolder}/zig-out/bin",
 }

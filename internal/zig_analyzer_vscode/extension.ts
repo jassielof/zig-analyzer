@@ -1,6 +1,7 @@
 // Client scaffolding only — no server lifecycle management. The server binary path is user-configured (`zigAnalyzer.serverPath`) with a PATH fallback to `zig-analyzer`.
 
 import { execFile } from "node:child_process";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
@@ -109,13 +110,52 @@ async function restart(): Promise<void> {
   await start();
 }
 
-/// Prefer the configured path; otherwise spawn `zig-analyzer` from PATH.
+const serverExecutableName = process.platform === "win32"
+  ? "zig-analyzer.exe"
+  : "zig-analyzer";
+
+/// Prefer a configured executable or directory. Expand workspace-folder variables
+/// ourselves: VS Code does not expand variables read through `getConfiguration`.
+/// With no setting, use the local build output when it exists, then fall back to PATH.
 function getServerPath(): string {
   const configured = vscode.workspace
     .getConfiguration("zigAnalyzer")
     .get<string>("serverPath", "")
     .trim();
-  return configured || "zig-analyzer";
+
+  if (configured) return executableInDirectory(expandWorkspaceFolder(configured));
+
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (workspaceFolder) {
+    const localBuild = path.join(
+      workspaceFolder.uri.fsPath,
+      "zig-out",
+      "bin",
+      serverExecutableName,
+    );
+    if (fs.existsSync(localBuild)) return localBuild;
+  }
+
+  return "zig-analyzer";
+}
+
+function executableInDirectory(candidate: string): string {
+  try {
+    return fs.statSync(candidate).isDirectory()
+      ? path.join(candidate, serverExecutableName)
+      : candidate;
+  } catch {
+    return candidate;
+  }
+}
+
+function expandWorkspaceFolder(value: string): string {
+  return value.replace(/\$\{workspaceFolder(?::([^}]+))?\}/g, (_, name) => {
+    const folder = name
+      ? vscode.workspace.workspaceFolders?.find((item) => item.name === name)
+      : vscode.workspace.workspaceFolders?.[0];
+    return folder?.uri.fsPath ?? _;
+  });
 }
 
 function getZigPath(): string {

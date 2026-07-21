@@ -261,7 +261,7 @@ fn generateVSCodeConfigFile(
     configuration.map.putAssumeCapacityNoClobber(try allocator.dupe(u8, "zigAnalyzer.serverPath"), .{
         .scope = "machine-overridable",
         .type = "string",
-        .description = "Path to the zig-analyzer executable. If empty, the extension looks for `zig-analyzer` on PATH.",
+        .description = "Path to the zig-analyzer executable or its containing directory. Supports ${workspaceFolder}; if empty, the extension first looks in ${workspaceFolder}/zig-out/bin, then for `zig-analyzer` on PATH.",
         .default = .{ .string = "" },
         .format = "path",
     });
