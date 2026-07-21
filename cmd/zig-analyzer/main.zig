@@ -3,6 +3,7 @@ const zig_builtin = @import("builtin");
 const zls = @import("zig_analyzer");
 const exe_options = @import("exe_options");
 
+// TODO: Replace known folders with Vereda.dirs (using dependencies/docent/dependencies/vereda)
 const known_folders = @import("known-folders");
 
 const log = std.log.scoped(.main);
