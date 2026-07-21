@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          submodules: true
+          submodules: recursive
       - name: Setup Zig
         uses: jassielof/setup-zig@main
       - name: Build
@@ -44,7 +44,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          submodules: true
+          submodules: recursive
       - name: Setup Zig
         uses: jassielof/setup-zig@main
       - name: Test suite
