@@ -511,6 +511,7 @@ fn parseArgs(
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
+// TODO: Replace the minimal init, with just the normal std.process.Init one
 pub fn main(init: std.process.Init.Minimal) !u8 {
     // TODO: I believe there's no need to add a conditional "is debug" check, there shouldn't be a difference between a debug or release build.
     const is_debug = exe_options.debug_gpa or switch (zig_builtin.mode) {
