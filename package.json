@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "build": "node esbuild.config.mjs",
     "watch": "node esbuild.config.mjs --watch",
-    "package": "node esbuild.config.mjs --production && vsce package --no-dependencies"
+    "package": "zig build && node tools/package_server.mjs && node esbuild.config.mjs --production && vsce package --no-dependencies"
   },
   "qna": "https://github.com/jassielof/zig-analyzer/discussions",
   "repository": {

@@ -12,3 +12,4 @@ tools/config_gen/builtins.json
 node_modules
 dist
 *.vsix
+server/

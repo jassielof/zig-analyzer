@@ -18,8 +18,14 @@ const execFileAsync = promisify(execFile);
 let client: LanguageClient | undefined;
 let codeLensProvider: ZigBuildCodeLensProvider | undefined;
 let zonCodeLensProvider: ZonCodeLensProvider | undefined;
+let bundledServerPath: string | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  bundledServerPath = path.join(
+    context.extensionPath,
+    "server",
+    serverExecutableName,
+  );
   codeLensProvider = new ZigBuildCodeLensProvider();
   zonCodeLensProvider = new ZonCodeLensProvider(getZigPath);
 
@@ -116,7 +122,7 @@ const serverExecutableName = process.platform === "win32"
 
 /// Prefer a configured executable or directory. Expand workspace-folder variables
 /// ourselves: VS Code does not expand variables read through `getConfiguration`.
-/// With no setting, use the local build output when it exists, then fall back to PATH.
+/// With no setting, use the bundled server, a local build output, then fall back to PATH.
 function getServerPath(): string {
   const configured = vscode.workspace
     .getConfiguration("zigAnalyzer")
@@ -124,6 +130,10 @@ function getServerPath(): string {
     .trim();
 
   if (configured) return executableInDirectory(expandWorkspaceFolder(configured));
+
+  if (bundledServerPath && fs.existsSync(bundledServerPath)) {
+    return bundledServerPath;
+  }
 
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (workspaceFolder) {

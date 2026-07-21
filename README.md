@@ -4,13 +4,13 @@ VS Code client for [zig-analyzer](https://github.com/jassielof/zig-analyzer), a 
 
 ## Requirements
 
-This extension is a thin LSP client — it does not bundle or download the `zig-analyzer` server binary. Build it yourself from the [zig-analyzer repository](https://github.com/jassielof/zig-analyzer). When your workspace contains `zig-out/bin/zig-analyzer` (or `.exe` on Windows), it is discovered automatically; otherwise set `zigAnalyzer.serverPath` or put `zig-analyzer` on your `PATH`.
+Released VSIX packages include the `zig-analyzer` server binary for the platform on which they were built, so no system-wide installation is required. Development builds still discover `zig-out/bin/zig-analyzer` (or `.exe` on Windows) automatically.
 
 ## Extension Settings
 
 Settings live under the `zigAnalyzer` namespace. Client-only:
 
-- `zigAnalyzer.serverPath`: Path to the `zig-analyzer` executable or its containing directory. `${workspaceFolder}` (including `${workspaceFolder:name}` in multi-root workspaces) is supported. If empty, the extension checks `${workspaceFolder}/zig-out/bin` before looking for `zig-analyzer` on `PATH`.
+- `zigAnalyzer.serverPath`: Optional override path to the `zig-analyzer` executable or its containing directory. `${workspaceFolder}` (including `${workspaceFolder:name}` in multi-root workspaces) is supported. If empty, the extension uses its bundled server, then checks `${workspaceFolder}/zig-out/bin`, then looks for `zig-analyzer` on `PATH`.
 
 For this repository, the optional setting is simply:
 
@@ -19,6 +19,10 @@ For this repository, the optional setting is simply:
   "zigAnalyzer.serverPath": "${workspaceFolder}/zig-out/bin"
 }
 ```
+
+### Packaging the bundled server
+
+`pnpm run package` builds the server for the current host, stages it as `server/zig-analyzer[.exe]`, and includes it in the VSIX. Build and publish a package on each supported target platform; a native server binary cannot run on a different operating system or CPU architecture.
 - `zigAnalyzer.trace.server`: Traces communication between VS Code and the language server (`off`, `messages`, `verbose`).
 
 LSP-mirrored settings (also understood by the server via `workspace/configuration`) include formatter, inlay hints, build-on-save, zig/lib paths, snippets, semantic tokens, reference code lenses, and unused-declaration diagnostics. See the Settings UI under **Zig Analyzer**.

@@ -33,6 +33,9 @@ zig-out/
 *.zig-cache/
 zig-pkg/
 
+# The package script stages the host binary here. Keep it in the VSIX.
+!server/**
+
 # Python
 pyproject.toml
 uv.lock
