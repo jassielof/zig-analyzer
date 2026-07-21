@@ -51,7 +51,6 @@ pub const Builder = struct {
                     .@"local variable" => try handleUnusedVariableOrConstant(builder, loc),
                     .@"switch tag capture", .capture => try handleUnusedCapture(builder, loc, &remove_capture_actions),
                 },
-                .non_camelcase_fn => try handleNonCamelcaseFunction(builder, loc),
                 .pointless_discard => try handlePointlessDiscard(builder, loc),
                 .omit_discard => |id| switch (id) {
                     .@"error capture; omit it instead" => {},
@@ -371,23 +370,6 @@ pub fn collectAutoDiscardDiagnostics(
     }
 }
 
-fn handleNonCamelcaseFunction(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
-    if (!builder.wantKind(.quickfix)) return;
-
-    const identifier_name = offsets.locToSlice(builder.handle.tree.source, loc);
-
-    if (std.mem.allEqual(u8, identifier_name, '_')) return;
-
-    const new_text = try createCamelcaseText(builder.arena, identifier_name);
-
-    try builder.actions.append(builder.arena, .{
-        .title = "make function name camelCase",
-        .kind = .quickfix,
-        .isPreferred = true,
-        .edit = try builder.createWorkspaceEdit(&.{builder.createTextEditLoc(loc, new_text)}),
-    });
-}
-
 fn handleUnusedFunctionParameter(builder: *Builder, loc: offsets.Loc) error{OutOfMemory}!void {
     if (!builder.wantKind(.@"source.fixAll") and !builder.wantKind(.quickfix)) return;
 
@@ -613,6 +595,13 @@ fn handleVariableNeverMutated(builder: *Builder, loc: offsets.Loc) error{OutOfMe
     const tree = &builder.handle.tree;
     const identifier_token = offsets.sourceIndexToTokenIndex(tree, loc.start).pickTokenTag(.identifier, tree) orelse return;
     if (identifier_token == 0) return;
+    // Zig's grammar guarantees that a declared variable's name token is always immediately
+    // preceded by its `var`/`const` keyword (`pub`/`export`/`comptime`/`threadlocal` only ever
+    // precede that keyword, never sit between it and the name), including for each half of an
+    // assign-destructure like `var a, const b = ...;`. So this is not a heuristic: if the
+    // diagnostic's location really is a variable's name token, the preceding token can only be
+    // `var` or `const` — and since this diagnostic only ever fires for `var`, anything else here
+    // means the location didn't point at what we expected, and we bail out rather than guess.
     const var_token = identifier_token - 1;
     if (tree.tokenTag(var_token) != .keyword_var) return;
 
@@ -1005,36 +994,6 @@ fn detectIndentation(source: []const u8) []const u8 {
     return "    "; // recommended style
 }
 
-// attempts to converts a slice of text into camelcase 'FUNCTION_NAME' -> 'functionName'
-fn createCamelcaseText(allocator: std.mem.Allocator, identifier: []const u8) error{OutOfMemory}![]const u8 {
-    // skip initial & ending underscores
-    const trimmed_identifier = std.mem.trim(u8, identifier, "_");
-
-    const num_separators = std.mem.count(u8, trimmed_identifier, "_");
-
-    const new_text_len = trimmed_identifier.len - num_separators;
-    var new_text: std.ArrayList(u8) = try .initCapacity(allocator, new_text_len);
-    errdefer new_text.deinit(allocator);
-
-    var idx: usize = 0;
-    while (idx < trimmed_identifier.len) {
-        const ch = trimmed_identifier[idx];
-        if (ch == '_') {
-            // the trimmed identifier is guaranteed to not have underscores at the end,
-            // so it can be assumed that ptr dereferences are safe until an alnum char is found
-            while (trimmed_identifier[idx] == '_') : (idx += 1) {}
-            const ch2 = trimmed_identifier[idx];
-            new_text.appendAssumeCapacity(std.ascii.toUpper(ch2));
-        } else {
-            new_text.appendAssumeCapacity(std.ascii.toLower(ch));
-        }
-
-        idx += 1;
-    }
-
-    return new_text.toOwnedSlice(allocator);
-}
-
 /// returns a discard string `_ = identifier_name; // autofix` with appropriate newlines and
 /// indentation so that a discard is on a new line after the `insert_token`.
 ///
@@ -1135,7 +1094,6 @@ const DiagnosticKind = union(enum) {
     unused: IdCat,
     pointless_discard: IdCat,
     omit_discard: DiscardCat,
-    non_camelcase_fn,
     undeclared_identifier,
     var_never_mutated,
 
@@ -1167,8 +1125,6 @@ const DiagnosticKind = union(enum) {
             return .{
                 .omit_discard = parseEnum(DiscardCat, msg["discard of ".len..]) orelse return null,
             };
-        } else if (std.mem.startsWith(u8, msg, "Functions should be camelCase")) {
-            return .non_camelcase_fn;
         } else if (std.mem.startsWith(u8, msg, "use of undeclared identifier")) {
             return .undeclared_identifier;
         } else if (std.mem.eql(u8, msg, "local variable is never mutated")) {
