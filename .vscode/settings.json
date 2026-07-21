@@ -8,4 +8,7 @@
     "**/references/**/*"
   ],
   "zigAnalyzer.serverPath": "${workspaceFolder}/zig-out/bin",
+  "files.exclude": {
+    "server": true
+  }
 }
