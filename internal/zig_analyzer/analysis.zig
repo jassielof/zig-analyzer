@@ -5266,6 +5266,19 @@ pub const PositionContext = union(enum) {
     import_string_literal: offsets.Loc,
     cinclude_string_literal: offsets.Loc,
     embedfile_string_literal: offsets.Loc,
+    /// The string literal is the first argument to a `.dependency(...)` call in a `build.zig`
+    /// (e.g. `b.dependency("na|me", ...)`).
+    build_dependency_string_literal: offsets.Loc,
+    /// The string literal is the argument to a `.module(...)` call chained directly off a
+    /// `.dependency("name", ...)` call in a `build.zig` (e.g.
+    /// `b.dependency("name", ...).module("mo|d")`).
+    build_module_string_literal: struct {
+        loc: offsets.Loc,
+        /// The dependency name recovered textually from the preceding chain, or `null` if it
+        /// couldn't be found there (e.g. the dependency was captured in an intermediate variable
+        /// instead of being chained directly, as in `const dep = b.dependency(...); dep.module(...)`).
+        dependency_name: ?[]const u8,
+    },
     string_literal: offsets.Loc,
     field_access: offsets.Loc,
     var_access: offsets.Loc,
@@ -5295,6 +5308,7 @@ pub const PositionContext = union(enum) {
             .import_string_literal,
             .cinclude_string_literal,
             .embedfile_string_literal,
+            .build_dependency_string_literal,
             .string_literal,
             .field_access,
             .var_access,
@@ -5306,6 +5320,7 @@ pub const PositionContext = union(enum) {
             .char_literal,
             .parens_expr,
             => |l| return l,
+            .build_module_string_literal => |payload| return payload.loc,
             .keyword => |token_index| return offsets.tokenToLoc(tree, token_index),
             .error_access,
             .comment,
@@ -5396,6 +5411,27 @@ fn tokenLocAppend(prev: offsets.Loc, token: std.zig.Token) offsets.Loc {
         .start = prev.start,
         .end = token.loc.end,
     };
+}
+
+/// Best-effort textual scan for `.dependency("name"` inside `chain_text` (the source span of a
+/// method-call chain like `b.dependency("name", .{...}).module`), used to recover which
+/// dependency a chained `.module(...)` call belongs to. Returns `null` if no such call is found
+/// in the chain, e.g. the dependency was captured in an intermediate variable instead of being
+/// chained directly (`const dep = b.dependency(...); dep.module(...)`).
+fn findDependencyNameInChain(chain_text: []const u8) ?[]const u8 {
+    const marker = ".dependency(";
+    const marker_index = std.mem.find(u8, chain_text, marker) orelse return null;
+
+    var index = marker_index + marker.len;
+    while (index < chain_text.len and std.ascii.isWhitespace(chain_text[index])) : (index += 1) {}
+    if (index >= chain_text.len or chain_text[index] != '"') return null;
+    index += 1;
+
+    const name_start = index;
+    while (index < chain_text.len and chain_text[index] != '"') : (index += 1) {}
+    if (index >= chain_text.len) return null;
+
+    return chain_text[name_start..index];
 }
 
 /// Given a byte index in a document (typically cursor offset), classify what kind of entity is at that index.
@@ -5552,6 +5588,19 @@ pub fn getPositionContext(
                                 new_state = .{ .cinclude_string_literal = tok.loc };
                             } else if (std.mem.eql(u8, builtin_name, "@embedFile")) {
                                 new_state = .{ .embedfile_string_literal = tok.loc };
+                            }
+                        },
+                        .field_access => |loc| {
+                            // `loc` spans the whole preceding chain (e.g. `b.dependency("name",
+                            // .{...}).module`), not just the immediately preceding identifier.
+                            const chain_text = tree.source[loc.start..loc.end];
+                            if (std.mem.endsWith(u8, chain_text, ".dependency")) {
+                                new_state = .{ .build_dependency_string_literal = tok.loc };
+                            } else if (std.mem.endsWith(u8, chain_text, ".module")) {
+                                new_state = .{ .build_module_string_literal = .{
+                                    .loc = tok.loc,
+                                    .dependency_name = findDependencyNameInChain(chain_text),
+                                } };
                             }
                         },
                         else => {},

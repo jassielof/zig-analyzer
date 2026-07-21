@@ -1037,6 +1037,122 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
     }
 }
 
+/// Sets a text edit that replaces the entire content of the string literal at `token_loc` for
+/// every completion item added so far that doesn't already have one. Used where the whole string
+/// should be replaced (dependency/module names), unlike `completeFileSystemStringLiteral`'s
+/// path-segment-aware replacement.
+fn setFullStringLiteralTextEdit(builder: *Builder, token_loc: offsets.Loc) void {
+    const source = builder.orig_handle.tree.source;
+
+    var content_loc = token_loc;
+    const string_literal_slice = offsets.locToSlice(source, token_loc);
+    if (std.mem.startsWith(u8, string_literal_slice, "\"")) {
+        content_loc.start += 1;
+        if (std.mem.endsWith(u8, string_literal_slice[1..], "\"")) {
+            content_loc.end -= 1;
+        }
+    }
+
+    const insert_range = offsets.locToRange(source, .{ .start = content_loc.start, .end = builder.source_index }, builder.server.offset_encoding);
+    const replace_range = offsets.locToRange(source, content_loc, builder.server.offset_encoding);
+
+    for (builder.completions.items()) |*item| {
+        if (item.textEdit == null) {
+            item.textEdit = createTextEdit(builder, .{ .newText = item.label, .insert = insert_range, .replace = replace_range });
+        }
+    }
+}
+
+/// Completes the dependency-name string literal in a `.dependency("|")` call inside a
+/// `build.zig` (e.g. `b.dependency("na|me", ...)`), listing dependency names straight from
+/// `build.zig.zon` as resolved by the build runner.
+fn completeBuildDependencyStringLiteral(builder: *Builder, loc: offsets.Loc) Analyser.Error!void {
+    if (!DocumentStore.isBuildFile(builder.orig_handle.uri)) return;
+
+    const store = &builder.server.document_store;
+    const build_file = store.getBuildFile(builder.orig_handle.uri) orelse return;
+    const build_config = build_file.tryLockConfig(store.io) orelse return;
+    defer build_file.unlockConfig(store.io);
+
+    try builder.completions.ensureUnusedCapacity(builder.arena, build_config.dependencies.map.count());
+    for (build_config.dependencies.map.keys(), build_config.dependencies.map.values()) |name, path| {
+        builder.completions.appendAssumeCapacity(.{
+            .label = name,
+            .kind = .Module,
+            .detail = path,
+            .sortText = try generateSortText(builder.arena, 4, name),
+        });
+    }
+
+    setFullStringLiteralTextEdit(builder, loc);
+}
+
+/// Completes the module-name string literal in a `.module("|")` call chained off a
+/// `.dependency("name", ...)` call inside a `build.zig` (e.g.
+/// `b.dependency("name", ...).module("mo|d")`).
+///
+/// There is no way to know a dependency's exposed module names without actually running its
+/// `build.zig` (`BuildConfig` only records a module's name where something in the current
+/// project's own graph already imports it by that name), so this is a best-effort textual scan
+/// of the dependency's `build.zig` source for `.addModule("name", ...)` calls. This misses
+/// modules registered indirectly (e.g. through a helper function, like this project's own
+/// `createLspModules`, or via `b.modules.put(...)` directly) or with a name built from anything
+/// other than a string literal.
+fn completeBuildModuleStringLiteral(builder: *Builder, loc: offsets.Loc, dependency_name: ?[]const u8) Analyser.Error!void {
+    if (!DocumentStore.isBuildFile(builder.orig_handle.uri)) return;
+    const dependency_name_val = dependency_name orelse return;
+
+    const store = &builder.server.document_store;
+    const build_file = store.getBuildFile(builder.orig_handle.uri) orelse return;
+
+    const dependency_build_zig_path = blk: {
+        const build_config = build_file.tryLockConfig(store.io) orelse return;
+        defer build_file.unlockConfig(store.io);
+        const path = build_config.dependencies.map.get(dependency_name_val) orelse return;
+        break :blk try builder.arena.dupe(u8, path);
+    };
+
+    const source = std.Io.Dir.cwd().readFileAlloc(
+        store.io,
+        dependency_build_zig_path,
+        builder.arena,
+        .limited(16 * 1024 * 1024),
+    ) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+
+    var seen: std.BufSet = .init(builder.arena);
+
+    const marker = ".addModule(";
+    var search_pos: usize = 0;
+    while (std.mem.findPos(u8, source, search_pos, marker)) |marker_index| {
+        var index = marker_index + marker.len;
+        search_pos = index;
+
+        while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
+        if (index >= source.len or source[index] != '"') continue;
+        index += 1;
+
+        const name_start = index;
+        while (index < source.len and source[index] != '"') : (index += 1) {}
+        if (index >= source.len) continue;
+
+        const name = source[name_start..index];
+        if (seen.contains(name)) continue;
+        try seen.insert(name);
+
+        try builder.completions.append(builder.arena, .{
+            .label = name,
+            .kind = .Module,
+            .detail = dependency_build_zig_path,
+            .sortText = try generateSortText(builder.arena, 4, name),
+        });
+    }
+
+    setFullStringLiteralTextEdit(builder, loc);
+}
+
 pub fn completionAtIndex(
     server: *Server,
     analyser: *Analyser,
@@ -1078,6 +1194,8 @@ pub fn completionAtIndex(
         .embedfile_string_literal,
         .string_literal,
         => try completeFileSystemStringLiteral(&builder, pos_context),
+        .build_dependency_string_literal => |loc| try completeBuildDependencyStringLiteral(&builder, loc),
+        .build_module_string_literal => |payload| try completeBuildModuleStringLiteral(&builder, payload.loc, payload.dependency_name),
         .test_doctest_name => {
             builder.use_snippets = false;
             try completeGlobal(&builder);

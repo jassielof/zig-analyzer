@@ -337,6 +337,8 @@ pub fn gotoHandler(
         .comment,
         .other,
         .empty,
+        .build_dependency_string_literal,
+        .build_module_string_literal,
         => return null,
     } orelse return null;
 
