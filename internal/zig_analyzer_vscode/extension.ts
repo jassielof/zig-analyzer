@@ -77,6 +77,10 @@ export function activate(context: vscode.ExtensionContext): void {
       "zigAnalyzer.executeRunFile",
       (filePath: string) => executeRunFile(filePath),
     ),
+    vscode.commands.registerCommand(
+      "zigAnalyzer.insertPlainLineAfter",
+      () => insertPlainLineAfter(),
+    ),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("zigAnalyzer.zigPath")) {
         zonCodeLensProvider?.refresh(); // the cached global package cache dir came from the old zigPath
@@ -131,6 +135,22 @@ async function restart(): Promise<void> {
   await client?.stop();
   client = undefined;
   await start();
+}
+
+/// Insert a line directly instead of invoking VS Code's Enter handling, which
+/// intentionally bypasses `onEnterRules` such as doc-comment continuation.
+async function insertPlainLineAfter(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.languageId !== "zig") return;
+
+  const line = editor.document.lineAt(editor.selection.active.line);
+  const indent = line.text.match(/^\s*/)?.[0] ?? "";
+  const nextPosition = new vscode.Position(line.lineNumber + 1, indent.length);
+
+  const applied = await editor.edit((edit) => {
+    edit.insert(line.range.end, `\n${indent}`);
+  });
+  if (applied) editor.selection = new vscode.Selection(nextPosition, nextPosition);
 }
 
 const serverExecutableName = process.platform === "win32"

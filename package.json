@@ -291,11 +291,15 @@
       {
         "command": "zigAnalyzer.executeRunFile",
         "title": "Zig Analyzer: Run Zig File"
+      },
+      {
+        "command": "zigAnalyzer.insertPlainLineAfter",
+        "title": "Zig Analyzer: Insert Plain Line After"
       }
     ],
     "keybindings": [
       {
-        "command": "editor.action.insertLineAfter",
+        "command": "zigAnalyzer.insertPlainLineAfter",
         "key": "shift+enter",
         "when": "editorTextFocus && editorLangId == zig"
       }
@@ -308,6 +312,10 @@
         },
         {
           "command": "zigAnalyzer.executeRunFile",
+          "when": "false"
+        },
+        {
+          "command": "zigAnalyzer.insertPlainLineAfter",
           "when": "false"
         }
       ]
