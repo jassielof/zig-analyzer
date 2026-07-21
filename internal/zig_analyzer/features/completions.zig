@@ -850,6 +850,24 @@ fn collectErrorSetNames(
     }
 }
 
+/// Resolves `name` exactly as `@import(name)` itself would (reusing the same resolution used by
+/// hover/goto-definition on an import string) and returns its top-of-file (`//!`) doc comment, if
+/// any, wrapped for a completion item. Only meant for the small, fixed set of `@import("...")`
+/// completion candidates ("std", "builtin", "root", dependency names, other named modules) —
+/// loading and analysing a file is too expensive to do for every entry of an arbitrary filesystem
+/// directory listing.
+fn documentationForImportName(builder: *Builder, name: []const u8) Analyser.Error!?types.Documentation {
+    var resolved_type = try builder.analyser.resolveImportString(builder.orig_handle, name) orelse return null;
+    if (std.mem.endsWith(u8, name, ".zon")) {
+        resolved_type = try resolved_type.instanceTypeVal(builder.analyser) orelse return null;
+    }
+    const doc = try resolved_type.docComments(builder.arena) orelse return null;
+    return .{ .markup_content = .{
+        .kind = if (builder.server.client_capabilities.completion_doc_supports_md) .markdown else .plaintext,
+        .value = doc,
+    } };
+}
+
 /// Asserts that `pos_context` is one of the following:
 ///  - `.import_string_literal`
 ///  - `.cinclude_string_literal`
@@ -894,6 +912,7 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
                 .label = "std",
                 .kind = .Module,
                 .detail = zig_lib_dir.path,
+                .documentation = try documentationForImportName(builder, "std"),
                 .sortText = "1",
             });
         }
@@ -902,6 +921,7 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
                 .label = "builtin",
                 .kind = .Module,
                 .detail = builtin_path,
+                .documentation = try documentationForImportName(builder, "builtin"),
                 .sortText = "2",
             });
         }
@@ -910,7 +930,7 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
             // no build system modules
         } else if (DocumentStore.isBuildFile(builder.orig_handle.uri)) blk: {
             const build_file = store.getBuildFile(builder.orig_handle.uri) orelse break :blk;
-            const build_config = build_file.tryLockConfig(store.io) orelse break :blk;
+            const build_config = try waitForBuildConfig(builder, build_file) orelse break :blk;
             defer build_file.unlockConfig(store.io);
 
             try builder.completions.ensureUnusedCapacity(builder.arena, build_config.dependencies.map.count());
@@ -919,35 +939,36 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
                     .label = name,
                     .kind = .Module,
                     .detail = path,
+                    .documentation = try documentationForImportName(builder, name),
                     .sortText = try generateSortText(builder.arena, 4, name),
                 });
             }
-        } else switch (try builder.orig_handle.getAssociatedBuildFile(store)) {
-            .none, .unresolved => {},
-            .resolved => |resolved| blk: {
-                const build_config = resolved.build_file.tryLockConfig(store.io) orelse break :blk;
-                defer resolved.build_file.unlockConfig(store.io);
+        } else blk: {
+            const resolved = try waitForAssociatedBuildFile(builder) orelse break :blk;
+            const build_config = try waitForBuildConfig(builder, resolved.build_file) orelse break :blk;
+            defer resolved.build_file.unlockConfig(store.io);
 
-                const module = build_config.modules.map.get(resolved.root_source_file) orelse break :blk;
+            const module = build_config.modules.map.get(resolved.root_source_file) orelse break :blk;
 
-                try builder.completions.ensureUnusedCapacity(builder.arena, 1 + module.import_table.map.count());
+            try builder.completions.ensureUnusedCapacity(builder.arena, 1 + module.import_table.map.count());
 
+            builder.completions.appendAssumeCapacity(.{
+                .label = "root",
+                .kind = .Module,
+                .detail = try builder.arena.dupe(u8, resolved.root_source_file),
+                .documentation = try documentationForImportName(builder, "root"),
+                .sortText = "3",
+            });
+
+            for (module.import_table.map.keys(), module.import_table.map.values()) |name, root_source_file| {
                 builder.completions.appendAssumeCapacity(.{
-                    .label = "root",
+                    .label = try builder.arena.dupe(u8, name),
                     .kind = .Module,
-                    .detail = try builder.arena.dupe(u8, resolved.root_source_file),
-                    .sortText = "3",
+                    .detail = try builder.arena.dupe(u8, root_source_file),
+                    .documentation = try documentationForImportName(builder, name),
+                    .sortText = try generateSortText(builder.arena, 4, name),
                 });
-
-                for (module.import_table.map.keys(), module.import_table.map.values()) |name, root_source_file| {
-                    builder.completions.appendAssumeCapacity(.{
-                        .label = try builder.arena.dupe(u8, name),
-                        .kind = .Module,
-                        .detail = try builder.arena.dupe(u8, root_source_file),
-                        .sortText = try generateSortText(builder.arena, 4, name),
-                    });
-                }
-            },
+            }
         }
 
         const string_content_range = offsets.locToRange(source, .{ .start = insert_loc.start, .end = string_content_loc.end }, builder.server.offset_encoding);
@@ -1037,6 +1058,48 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
     }
 }
 
+/// How long completions are willing to block waiting on the build runner before giving up and
+/// returning whatever's available. The build runner resolves a `build.zig`'s module graph by
+/// actually running `zig build` with a custom runner, which on a document's first open can easily
+/// take longer than a single completion request would otherwise take - without this, the first
+/// `@import("|")`/`.dependency("|")`/`.module("|")` completion after opening a file can silently
+/// miss "root"/module names, with nothing prompting the editor to ask again once the build config
+/// actually finishes resolving in the background.
+const build_config_wait_budget_ms: i64 = 2000;
+const build_config_poll_interval_ms: i64 = 100;
+
+/// Polls `build_file.tryLockConfig` until it succeeds or `build_config_wait_budget_ms` elapses.
+/// Caller must call `build_file.unlockConfig(builder.server.io)` on a non-null result.
+fn waitForBuildConfig(builder: *Builder, build_file: *DocumentStore.BuildFile) Analyser.Error!?DocumentStore.BuildConfig {
+    const io = builder.server.io;
+    var waited_ms: i64 = 0;
+    while (true) {
+        if (build_file.tryLockConfig(io)) |config| return config;
+        if (waited_ms >= build_config_wait_budget_ms) return null;
+        try std.Io.sleep(io, .fromMilliseconds(build_config_poll_interval_ms), .awake);
+        waited_ms += build_config_poll_interval_ms;
+    }
+}
+
+/// Polls `handle.getAssociatedBuildFile` until it resolves definitively (`.resolved`/`.none`) or
+/// `build_config_wait_budget_ms` elapses, to ride out the same build-runner race as
+/// `waitForBuildConfig`.
+fn waitForAssociatedBuildFile(builder: *Builder) Analyser.Error!?DocumentStore.Handle.AssociatedBuildFile.Resolved {
+    const io = builder.server.io;
+    const store = &builder.server.document_store;
+    var waited_ms: i64 = 0;
+    while (true) {
+        switch (try builder.orig_handle.getAssociatedBuildFile(store)) {
+            .resolved => |resolved| return resolved,
+            .none => return null,
+            .unresolved => {},
+        }
+        if (waited_ms >= build_config_wait_budget_ms) return null;
+        try std.Io.sleep(io, .fromMilliseconds(build_config_poll_interval_ms), .awake);
+        waited_ms += build_config_poll_interval_ms;
+    }
+}
+
 /// Sets a text edit that replaces the entire content of the string literal at `token_loc` for
 /// every completion item added so far that doesn't already have one. Used where the whole string
 /// should be replaced (dependency/module names), unlike `completeFileSystemStringLiteral`'s
@@ -1071,7 +1134,7 @@ fn completeBuildDependencyStringLiteral(builder: *Builder, loc: offsets.Loc) Ana
 
     const store = &builder.server.document_store;
     const build_file = store.getBuildFile(builder.orig_handle.uri) orelse return;
-    const build_config = build_file.tryLockConfig(store.io) orelse return;
+    const build_config = try waitForBuildConfig(builder, build_file) orelse return;
     defer build_file.unlockConfig(store.io);
 
     try builder.completions.ensureUnusedCapacity(builder.arena, build_config.dependencies.map.count());
@@ -1106,7 +1169,7 @@ fn completeBuildModuleStringLiteral(builder: *Builder, loc: offsets.Loc, depende
     const build_file = store.getBuildFile(builder.orig_handle.uri) orelse return;
 
     const dependency_build_zig_path = blk: {
-        const build_config = build_file.tryLockConfig(store.io) orelse return;
+        const build_config = try waitForBuildConfig(builder, build_file) orelse return;
         defer build_file.unlockConfig(store.io);
         const path = build_config.dependencies.map.get(dependency_name_val) orelse return;
         break :blk try builder.arena.dupe(u8, path);

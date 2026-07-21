@@ -563,6 +563,64 @@ fn hoverDefinitionNumberLiteral(
     };
 }
 
+/// Hovering the string literal of `@import("...")` itself (as opposed to an identifier bound to
+/// its result, e.g. `root` in `const root = @import("root");`) previously showed nothing, even
+/// though the same doc-comment pipeline already works once something resolves the import's type
+/// — this reuses that pipeline directly instead of requiring an intermediate declaration.
+fn hoverDefinitionImportString(
+    analyser: *Analyser,
+    arena: std.mem.Allocator,
+    handle: *DocumentStore.Handle,
+    pos_context: Analyser.PositionContext,
+    markup_kind: types.MarkupKind,
+    offset_encoding: offsets.Encoding,
+) Analyser.Error!?types.Hover {
+    const loc = pos_context.loc(&handle.tree) orelse return null;
+    const import_str = offsets.locToSlice(handle.tree.source, pos_context.stringLiteralContentLoc(handle.tree.source));
+
+    // Resolving e.g. "root" or a named module import needs the build runner's config, which on a
+    // document's first open can still be resolving in the background - wait a bounded amount for
+    // it rather than immediately reporting "no docs available" (see the identical concern for
+    // completions in features/completions.zig, `waitForBuildConfig`/`waitForAssociatedBuildFile`).
+    var resolved_type: Analyser.Type = undefined;
+    {
+        const io = analyser.store.io;
+        var waited_ms: i64 = 0;
+        while (true) {
+            if (try analyser.resolveImportString(handle, import_str)) |ty| {
+                resolved_type = ty;
+                break;
+            }
+            if (waited_ms >= 2000) return null;
+            try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+            waited_ms += 100;
+        }
+    }
+    if (std.mem.endsWith(u8, import_str, ".zon")) {
+        // `@import` of a `.zig` file is a type; `@import` of a `.zon` file is a value (see the
+        // `.import` case in `resolveTypeOfNodeUncached`) — unwrap the same way here.
+        resolved_type = try resolved_type.instanceTypeVal(analyser) orelse return null;
+    }
+
+    var doc_strings: std.ArrayList([]const u8) = .empty;
+    const hover_text = try hoverSymbolResolvedType(
+        analyser,
+        arena,
+        import_str,
+        markup_kind,
+        &doc_strings,
+        resolved_type,
+    ) orelse return null;
+
+    return .{
+        .contents = .{ .markup_content = .{
+            .kind = markup_kind,
+            .value = hover_text,
+        } },
+        .range = offsets.locToRange(handle.tree.source, loc, offset_encoding),
+    };
+}
+
 pub fn hover(
     analyser: *Analyser,
     arena: std.mem.Allocator,
@@ -584,6 +642,7 @@ pub fn hover(
         .label_access, .label_decl => |loc| try hoverDefinitionLabel(analyser, arena, handle, source_index, loc, markup_kind, offset_encoding),
         .enum_literal => try hoverDefinitionEnumLiteral(analyser, arena, handle, source_index, markup_kind, offset_encoding),
         .number_literal, .char_literal => try hoverDefinitionNumberLiteral(arena, handle, source_index, markup_kind, offset_encoding),
+        .import_string_literal => try hoverDefinitionImportString(analyser, arena, handle, pos_context, markup_kind, offset_encoding),
         else => null,
     };
 
