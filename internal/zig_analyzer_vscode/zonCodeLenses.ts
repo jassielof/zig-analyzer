@@ -11,9 +11,9 @@ const execFileAsync = promisify(execFile);
  * CodeLens showing each `build.zig.zon` dependency's resolved version —
  * read from the dependency's own `build.zig.zon`, not fetched from the
  * web. Path-based dependencies resolve directly; url/hash-based ones
- * resolve through Zig's global package cache (`{cache}/p/{hash}`), which
- * is where `zig build`/`zig fetch` already leave them on disk once
- * fetched at least once — nothing is downloaded by this extension.
+ * first check the project-local package cache (`zig-pkg/{hash}`), then
+ * Zig's global package cache (`{cache}/p/{hash}`). Both locations are
+ * populated by Zig; nothing is downloaded by this extension.
  */
 export class ZonCodeLensProvider implements vscode.CodeLensProvider {
   private readonly _onDidChange = new vscode.EventEmitter<void>();
@@ -68,6 +68,11 @@ export class ZonCodeLensProvider implements vscode.CodeLensProvider {
       return readVersionAt(path.resolve(zonDir, dep.path));
     }
     if (dep.hash) {
+      const localVersion = readVersionAt(
+        path.join(zonDir, "zig-pkg", dep.hash),
+      );
+      if (localVersion) return localVersion;
+
       const cacheDir = await this.getGlobalCacheDir();
       if (!cacheDir) return undefined;
       return readVersionAt(path.join(cacheDir, "p", dep.hash));
