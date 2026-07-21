@@ -39,3 +39,4 @@ zig-pkg/
 # Python
 pyproject.toml
 uv.lock
+.venv/
