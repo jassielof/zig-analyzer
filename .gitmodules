@@ -13,3 +13,6 @@
 [submodule "references/simdjzon-rpc"]
 	path = references/simdjzon-rpc
 	url = https://github.com/archaistvolts/simdjzon-rpc
+[submodule "dependencies/docent"]
+	path = dependencies/docent
+	url = https://github.com/jassielof/docent
