@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const fangz_build = @import("fangz");
 const lsp_build = @import("build/lsp.zig");
 const version_build = @import("build/version.zig");
 const zig_analyzer_build = @import("build/zig_analyzer.zig");
@@ -28,7 +29,6 @@ pub fn build(b: *std.Build) !void {
 
         exe_options.addOption(bool, "enable_failing_allocator", b.option(bool, "enable-failing-allocator", "Whether to use a randomly failing allocator.") orelse false);
         exe_options.addOption(u32, "enable_failing_allocator_likelihood", b.option(u32, "enable-failing-allocator-likelihood", "The chance that an allocation will fail is `1/likelihood`") orelse 256);
-        exe_options.addOption(bool, "debug_gpa", b.option(bool, "debug-allocator", "Force the DebugAllocator to be used in all release modes") orelse false);
 
         break :blk exe_options.createModule();
     };
@@ -126,10 +126,15 @@ pub fn build(b: *std.Build) !void {
     });
     b.modules.put(b.allocator, "zig_analyzer", zig_analyzer_module) catch @panic("OOM");
 
-    const known_folders_module = b.dependency("known_folders", .{
+    const fangz_module = b.dependency("fangz", .{
         .target = target,
         .optimize = optimize,
-    }).module("known-folders");
+    }).module("fangz");
+
+    const vereda_module = b.dependency("vereda", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("vereda");
 
     const exe_module = b.createModule(.{
         .root_source_file = b.path("cmd/zig-analyzer/main.zig"),
@@ -137,7 +142,8 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "exe_options", .module = exe_options },
-            .{ .name = "known-folders", .module = known_folders_module },
+            .{ .name = "fangz", .module = fangz_module },
+            .{ .name = "vereda", .module = vereda_module },
             .{ .name = "zig_analyzer", .module = zig_analyzer_module },
         },
     });
@@ -147,6 +153,7 @@ pub fn build(b: *std.Build) !void {
             .name = "zig-analyzer",
             .root_module = exe_module,
         });
+        fangz_build.injectMetadata(b, exe, fangz_module);
         b.installArtifact(exe);
     }
 

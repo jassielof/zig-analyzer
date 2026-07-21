@@ -2,36 +2,10 @@ const std = @import("std");
 const zig_builtin = @import("builtin");
 const zls = @import("zig_analyzer");
 const exe_options = @import("exe_options");
-
-// TODO: Replace known folders with Vereda.dirs (using dependencies/docent/dependencies/vereda)
-const known_folders = @import("known-folders");
+const fangz = @import("fangz");
+const vereda = @import("vereda");
 
 const log = std.log.scoped(.main);
-
-// TODO: Replace this bare CLI with Fangz. As well rebrand to Zig Analyzer.
-const usage =
-    \\ZLS - A non-official language server for Zig
-    \\
-    \\Commands:
-    \\  help, --help,             Print this help and exit
-    \\  version, --version        Print version number and exit
-    \\  env                       Print config path, log path and version
-    \\
-    \\General Options:
-    \\  --config-path [path]      Set path to the 'zls.json' configuration file
-    \\  --log-file [path]         Set path to the 'zls.log' log file
-    \\  --log-level [enum]        The Log Level to be used.
-    \\                              Supported Values:
-    \\                                err
-    \\                                warn
-    \\                                info (default)
-    \\                                debug
-    \\
-    \\Advanced Options:
-    \\  --enable-stderr-logs      Write log message to stderr
-    \\  --disable-lsp-logs        Disable LSP 'window/logMessage' messages
-    \\
-;
 
 pub const std_options: std.Options = .{
     // Always set this to debug to make std.log call into our handler, then control the runtime
@@ -121,13 +95,18 @@ fn logFn(
     }
 }
 
-fn defaultLogFilePath(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
-) error{ Canceled, OutOfMemory }!?[]const u8 {
+/// Resolves an optional Vereda directory, treating any non-allocation failure (directory not
+/// available, home directory unknown, ...) as "not found" rather than propagating it.
+fn resolveDirOptional(allocator: std.mem.Allocator, comptime resolver: anytype) error{OutOfMemory}!?[]u8 {
+    return resolver(allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+}
+
+fn defaultLogFilePath(allocator: std.mem.Allocator) error{OutOfMemory}!?[]const u8 {
     if (zig_builtin.target.os.tag == .wasi) return null;
-    const cache_path = try known_folders.getPath(io, allocator, environ_map.*, .cache) orelse return null;
+    const cache_path = try resolveDirOptional(allocator, vereda.dirs.cache) orelse return null;
     defer allocator.free(cache_path);
     return try std.Io.Dir.path.join(allocator, &.{ cache_path, "zig-analyzer", "zig-analyzer.log" });
 }
@@ -135,13 +114,12 @@ fn defaultLogFilePath(
 fn createLogFile(
     io: std.Io,
     allocator: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
     override_log_file_path: ?[]const u8,
 ) error{ Canceled, OutOfMemory }!?struct { std.Io.File, []const u8 } {
     const log_file_path = if (override_log_file_path) |log_file_path|
         try allocator.dupe(u8, log_file_path)
     else
-        try defaultLogFilePath(io, allocator, environ_map) orelse return null;
+        try defaultLogFilePath(allocator) orelse return null;
     errdefer allocator.free(log_file_path);
 
     if (std.Io.Dir.path.dirname(log_file_path)) |dirname| {
@@ -163,55 +141,39 @@ fn createLogFile(
     return .{ file, log_file_path };
 }
 
-/// Output format of `zls env`
+/// Output format of `zig-analyzer env`
 const Env = struct {
-    /// The ZLS version. Guaranteed to be a [semantic version](https://semver.org/).
+    /// The Zig Analyzer version. Guaranteed to be a [semantic version](https://semver.org/).
     ///
     /// The semantic version can have one of the following formats:
-    /// - `MAJOR.MINOR.PATCH` is a tagged release of ZLS
-    /// - `MAJOR.MINOR.PATCH-dev.COMMIT_HEIGHT+SHORT_COMMIT_HASH` is a development build of ZLS
-    /// - `MAJOR.MINOR.PATCH-dev` is a development build of ZLS where the exact version could not be resolved.
+    /// - `MAJOR.MINOR.PATCH` is a tagged release of Zig Analyzer
+    /// - `MAJOR.MINOR.PATCH-dev.COMMIT_HEIGHT+SHORT_COMMIT_HASH` is a development build of Zig Analyzer
+    /// - `MAJOR.MINOR.PATCH-dev` is a development build of Zig Analyzer where the exact version could not be resolved.
     ///
     version: []const u8,
     global_cache_dir: ?[]const u8,
-    /// Path to a global configuration directory relative to which ZLS configuration files will be searched.
-    /// Not `null` unless [known-folders](https://github.com/ziglibs/known-folders) was unable to find a global configuration directory.
-    global_config_dir: ?[]const u8,
-    /// Path to a user specific configuration directory relative to which configuration files will be searched.
-    /// Not `null` unless [known-folders](https://github.com/ziglibs/known-folders) was unable to find a local configuration directory.
-    local_config_dir: ?[]const u8,
-    /// Path to a `zls.json` config file. Will be resolved by looking in the local configuration directory and then falling back to the global directory.
-    /// Can be null if no `zls.json` was found in the global/local config directory.
+    /// Path to a user-specific configuration directory relative to which configuration files will be searched.
+    /// Not `null` unless [Vereda](https://github.com/jassielof/vereda) was unable to resolve a configuration directory.
+    config_dir: ?[]const u8,
+    /// Path to a `zls.json` config file. Will be resolved by looking inside the configuration directory.
+    /// Can be null if no `zls.json` was found in the configuration directory.
     config_file: ?[]const u8,
-    /// Path to a `zls.log` file where ZLS will append logging output. The file may be truncated or cleared by ZLS.
-    /// Not `null` unless [known-folders](https://github.com/ziglibs/known-folders) was unable to find a cache directory.
+    /// Path to a `zls.log` file where Zig Analyzer will append logging output. The file may be truncated or cleared.
+    /// Not `null` unless [Vereda](https://github.com/jassielof/vereda) was unable to resolve a cache directory.
     log_file: ?[]const u8,
 };
 
-fn @"zls env"(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    environ_map: *const std.process.Environ.Map,
-) (std.mem.Allocator.Error || std.Io.File.Writer.Error)!noreturn {
-    const global_cache_dir = known_folders.getPath(io, allocator, environ_map.*, .cache) catch |err| switch (err) {
-        error.Canceled, error.OutOfMemory => |e| return e,
-    };
+fn printEnv(io: std.Io, allocator: std.mem.Allocator) (std.mem.Allocator.Error || std.Io.File.Writer.Error)!void {
+    const global_cache_dir = try resolveDirOptional(allocator, vereda.dirs.cache);
     defer if (global_cache_dir) |path| allocator.free(path);
 
     const zls_global_cache_dir = if (global_cache_dir) |cache_dir| try std.Io.Dir.path.join(allocator, &.{ cache_dir, "zig-analyzer" }) else null;
     defer if (zls_global_cache_dir) |path| allocator.free(path);
 
-    const global_config_dir = known_folders.getPath(io, allocator, environ_map.*, .global_configuration) catch |err| switch (err) {
-        error.Canceled, error.OutOfMemory => |e| return e,
-    };
-    defer if (global_config_dir) |path| allocator.free(path);
+    const config_dir = try resolveDirOptional(allocator, vereda.dirs.config);
+    defer if (config_dir) |path| allocator.free(path);
 
-    const local_config_dir = known_folders.getPath(io, allocator, environ_map.*, .local_configuration) catch |err| switch (err) {
-        error.Canceled, error.OutOfMemory => |e| return e,
-    };
-    defer if (local_config_dir) |path| allocator.free(path);
-
-    var config_result = try loadConfigFromSystem(io, allocator, environ_map.*);
+    var config_result = try loadConfigFromSystem(io, allocator);
     defer config_result.deinit(allocator);
 
     const config_file_path: ?[]const u8 = switch (config_result) {
@@ -226,7 +188,7 @@ fn @"zls env"(
         .not_found => null,
     };
 
-    const log_file_path = try defaultLogFilePath(io, allocator, environ_map);
+    const log_file_path = try defaultLogFilePath(allocator);
     defer if (log_file_path) |path| allocator.free(path);
 
     var buffer: [512]u8 = undefined;
@@ -236,16 +198,13 @@ fn @"zls env"(
     const env: Env = .{
         .version = zls.build_options.version_string,
         .global_cache_dir = zls_global_cache_dir,
-        .global_config_dir = global_config_dir,
-        .local_config_dir = local_config_dir,
+        .config_dir = config_dir,
         .config_file = config_file_path,
         .log_file = log_file_path,
     };
     std.json.Stringify.value(env, .{ .whitespace = .indent_1 }, writer) catch return file_writer.err.?;
     writer.writeAll("\n") catch return file_writer.err.?;
     writer.flush() catch return file_writer.err.?;
-
-    std.process.exit(0);
 }
 
 const LoadConfigResult = union(enum) {
@@ -346,32 +305,21 @@ fn loadConfigFromFile(io: std.Io, allocator: std.mem.Allocator, file_path: []con
     } };
 }
 
-fn loadConfigFromSystem(io: std.Io, allocator: std.mem.Allocator, environ_map: std.process.Environ.Map) error{ Canceled, OutOfMemory }!LoadConfigResult {
+fn loadConfigFromSystem(io: std.Io, allocator: std.mem.Allocator) error{ Canceled, OutOfMemory }!LoadConfigResult {
     if (zig_builtin.target.os.tag == .wasi) return .not_found;
 
-    for (
-        [_]known_folders.KnownFolder{ .local_configuration, .global_configuration },
-    ) |folder| {
-        const folder_path = try known_folders.getPath(io, allocator, environ_map, folder) orelse continue;
-        defer allocator.free(folder_path);
+    const config_dir = try resolveDirOptional(allocator, vereda.dirs.config) orelse return .not_found;
+    defer allocator.free(config_dir);
 
-        const config_path = try std.Io.Dir.path.join(allocator, &.{ folder_path, "zls.json" });
-        defer allocator.free(config_path);
+    const config_path = try std.Io.Dir.path.join(allocator, &.{ config_dir, "zls.json" });
+    defer allocator.free(config_path);
 
-        const result = try loadConfigFromFile(io, allocator, config_path);
-        switch (result) {
-            .success, .failure => return result,
-            .not_found => continue,
-        }
-    }
-
-    return .not_found;
+    return try loadConfigFromFile(io, allocator, config_path);
 }
 
 fn loadConfiguration(
     io: std.Io,
     allocator: std.mem.Allocator,
-    environ_map: std.process.Environ.Map,
     server: *zls.Server,
     maybe_config_path: ?[]const u8,
 ) error{ Canceled, OutOfMemory }!void {
@@ -383,7 +331,7 @@ fn loadConfiguration(
         var config_result = if (maybe_config_path) |config_path|
             try loadConfigFromFile(io, allocator, config_path)
         else
-            try loadConfigFromSystem(io, allocator, environ_map);
+            try loadConfigFromSystem(io, allocator);
         defer config_result.deinit(allocator);
 
         switch (config_result) {
@@ -408,7 +356,7 @@ fn loadConfiguration(
             break :blk;
         }
 
-        const cache_dir_path = try known_folders.getPath(io, allocator, environ_map, .cache) orelse {
+        const cache_dir_path = try resolveDirOptional(allocator, vereda.dirs.cache) orelse {
             server.showMessage(.Error, "Failed to resolve global cache directory", .{});
             break :blk;
         };
@@ -420,133 +368,38 @@ fn loadConfiguration(
     try server.config_manager.setConfiguration2(.frontend, &config);
 }
 
-const ParseArgsResult = struct {
-    config_path: ?[]const u8 = null,
-    log_level: ?std.log.Level = null,
-    log_file_path: ?[]const u8 = null,
-    zls_exe_path: []const u8 = "",
-    enable_stderr_logs: bool = false,
-    disable_lsp_logs: bool = false,
-
-    fn deinit(self: ParseArgsResult, allocator: std.mem.Allocator) void {
-        defer if (self.config_path) |path| allocator.free(path);
-        defer if (self.log_file_path) |path| allocator.free(path);
-        defer allocator.free(self.zls_exe_path);
-    }
-};
-
-const ParseArgsError = std.mem.Allocator.Error || std.Io.File.Writer.Error;
-
-fn parseArgs(
+/// Cross-cutting state shared with Fangz command hooks, which are plain function pointers and
+/// therefore cannot close over local state in `main`.
+const StartupContext = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     environ_map: *const std.process.Environ.Map,
-    args: std.process.Args,
-) ParseArgsError!ParseArgsResult {
-    var result: ParseArgsResult = .{};
-    errdefer result.deinit(allocator);
+    exe_path: []const u8,
+    exit_status: u8 = 0,
+};
+var startup_context: StartupContext = undefined;
 
-    var args_it = try args.iterateAllocator(allocator);
-    defer args_it.deinit();
+fn runEnvCommand(ctx: *fangz.ParseContext) anyerror!void {
+    _ = ctx;
+    try printEnv(startup_context.io, startup_context.allocator);
+}
 
-    const zls_exe_path = args_it.next() orelse "";
-    result.zls_exe_path = try allocator.dupe(u8, zls_exe_path);
-
-    var arg_index: usize = 0;
-    while (args_it.next()) |arg| : (arg_index += 1) {
-        if ((arg_index == 0 and std.mem.eql(u8, arg, "help")) or
-            std.mem.eql(u8, arg, "-h") or
-            std.mem.eql(u8, arg, "--help"))
-        {
-            try std.Io.File.stderr().writeStreamingAll(io, usage);
-            std.process.exit(0);
-        } else if ((arg_index == 0 and std.mem.eql(u8, arg, "version")) or std.mem.eql(u8, arg, "--version")) {
-            try std.Io.File.stdout().writeStreamingAll(io, zls.build_options.version_string ++ "\n");
-            std.process.exit(0);
-        } else if (arg_index == 0 and std.mem.eql(u8, arg, "env")) {
-            try @"zls env"(io, allocator, environ_map);
-        }
-
-        if (std.mem.eql(u8, arg, "--config-path")) { // --config-path
-            const path = args_it.next() orelse {
-                log.err("Expected configuration file path after --config-path argument.", .{});
-                std.process.exit(1);
-            };
-            if (result.config_path) |old_config_path| allocator.free(old_config_path);
-            result.config_path = try allocator.dupe(u8, path);
-        } else if (std.mem.eql(u8, arg, "--log-file")) { // --log-file
-            const path = args_it.next() orelse {
-                log.err("Expected configuration file path after --log-file argument.", .{});
-                std.process.exit(1);
-            };
-            if (result.log_file_path) |old_file_path| allocator.free(old_file_path);
-            result.log_file_path = try allocator.dupe(u8, path);
-        } else if (std.mem.eql(u8, arg, "--log-level")) { // --log-level
-            const log_level_name = args_it.next() orelse {
-                log.err("Expected argument after --log-level", .{});
-                std.process.exit(1);
-            };
-            result.log_level = std.meta.stringToEnum(std.log.Level, log_level_name) orelse {
-                log.err("Invalid --log-level argument. Expected one of {{'debug', 'info', 'warn', 'err'}} but got '{s}'", .{log_level_name});
-                std.process.exit(1);
-            };
-        } else if (std.mem.eql(u8, arg, "--enable-stderr-logs")) { // --enable-stderr-logs
-            result.enable_stderr_logs = true;
-        } else if (std.mem.eql(u8, arg, "--disable-lsp-logs")) { // --disable-lsp-logs
-            result.disable_lsp_logs = true;
-        } else {
-            log.err("Unrecognized argument: '{s}'", .{arg});
-            std.process.exit(1);
-        }
-    }
+fn runServer(ctx: *fangz.ParseContext) anyerror!void {
+    const io = startup_context.io;
+    const allocator = startup_context.allocator;
 
     if (zig_builtin.target.os.tag != .wasi and try std.Io.File.stdin().isTty(io)) {
-        log.warn("ZLS is not a CLI tool, it communicates over the Language Server Protocol.", .{});
-        log.warn("Did you mean to run 'zls --help'?", .{});
+        log.warn("zig-analyzer is not a CLI tool, it communicates over the Language Server Protocol.", .{});
+        log.warn("Did you mean to run 'zig-analyzer --help'?", .{});
         log.warn("", .{});
     }
 
-    return result;
-}
+    const config_path = ctx.stringFlag("config-path");
+    const cli_log_level = ctx.enumFlag(std.log.Level, "log-level");
+    const enable_stderr_logs = ctx.boolFlag("enable-stderr-logs") orelse false;
+    const disable_lsp_logs = ctx.boolFlag("disable-lsp-logs") orelse false;
 
-var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-
-// TODO: Replace the minimal init, with just the normal std.process.Init one
-pub fn main(init: std.process.Init.Minimal) !u8 {
-    // TODO: I believe there's no need to add a conditional "is debug" check, there shouldn't be a difference between a debug or release build.
-    const is_debug = exe_options.debug_gpa or switch (zig_builtin.mode) {
-        .Debug => true,
-        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => zig_builtin.single_threaded,
-    };
-    const base_allocator = if (is_debug)
-        debug_allocator.allocator()
-    else if (zig_builtin.link_libc)
-        std.heap.c_allocator
-    else if (zig_builtin.target.os.tag == .wasi)
-        std.heap.wasm_allocator
-    else
-        std.heap.smp_allocator;
-    defer if (is_debug) {
-        _ = debug_allocator.deinit();
-    };
-
-    var failing_allocator_state = if (exe_options.enable_failing_allocator) zls.testing.FailingAllocator.init(base_allocator, exe_options.enable_failing_allocator_likelihood) else {};
-    const allocator: std.mem.Allocator = if (exe_options.enable_failing_allocator) failing_allocator_state.allocator() else base_allocator;
-
-    var threaded: std.Io.Threaded = .init(allocator, .{
-        .environ = init.environ,
-        .argv0 = .init(init.args),
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var environ_map = try init.environ.createMap(allocator);
-    defer environ_map.deinit();
-
-    const result = try parseArgs(io, allocator, &environ_map, init.args);
-    defer result.deinit(allocator);
-
-    log_file, const log_file_path = try createLogFile(io, allocator, &environ_map, result.log_file_path) orelse .{ null, null };
+    log_file, const log_file_path = try createLogFile(io, allocator, ctx.stringFlag("log-file")) orelse .{ null, null };
     defer if (log_file_path) |path| allocator.free(path);
     defer if (log_file) |file| {
         file.close(io);
@@ -563,22 +416,22 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
 
     const transport: *zls.lsp.Transport = &thread_safe_transport.transport;
 
-    log_transport = if (result.disable_lsp_logs) null else transport;
-    log_stderr = result.enable_stderr_logs;
-    log_level = result.log_level orelse log_level;
+    log_transport = if (disable_lsp_logs) null else transport;
+    log_stderr = enable_stderr_logs;
+    log_level = cli_log_level orelse log_level;
     defer {
         log_transport = null;
         log_stderr = true;
     }
 
-    log.info("Starting ZLS      {s} @ '{s}'", .{ zls.build_options.version_string, result.zls_exe_path });
+    log.info("Starting Zig Analyzer {s} @ '{s}'", .{ zls.build_options.version_string, startup_context.exe_path });
     if (log_file_path) |path| {
         log.info("Log File:         {s} ({t})", .{ path, log_level });
     } else {
         log.info("Log File:         none", .{});
     }
 
-    var config_manager: zls.configuration.Manager = try .init(io, allocator, &environ_map);
+    var config_manager: zls.configuration.Manager = try .init(io, allocator, startup_context.environ_map);
     defer config_manager.deinit();
 
     const server: *zls.Server = try .create(.{
@@ -589,13 +442,90 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     });
     defer server.destroy();
 
-    try loadConfiguration(io, allocator, environ_map, server, result.config_path);
+    try loadConfiguration(io, allocator, server, config_path);
 
     try server.loop();
 
-    switch (server.status) {
-        .exiting_failure => return 1,
-        .exiting_success => return 0,
+    startup_context.exit_status = switch (server.status) {
+        .exiting_failure => 1,
+        .exiting_success => 0,
         else => unreachable,
+    };
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    var failing_allocator_state = if (exe_options.enable_failing_allocator) zls.testing.FailingAllocator.init(init.gpa, exe_options.enable_failing_allocator_likelihood) else {};
+    const allocator: std.mem.Allocator = if (exe_options.enable_failing_allocator) failing_allocator_state.allocator() else init.gpa;
+
+    var exe_path_it = try init.minimal.args.iterateAllocator(allocator);
+    const exe_path = try allocator.dupe(u8, exe_path_it.next() orelse "");
+    exe_path_it.deinit();
+    defer allocator.free(exe_path);
+
+    startup_context = .{
+        .io = init.io,
+        .allocator = allocator,
+        .environ_map = init.environ_map,
+        .exe_path = exe_path,
+    };
+
+    var app: fangz.App = try .init(allocator, init.io, .{
+        .display_name = "Zig Analyzer",
+        .brief = "A non-official language server for Zig",
+        .version = zls.build_options.version_string,
+    });
+    defer app.deinit();
+    app.setCompletionsEnabled(false);
+    app.setDocsEnabled(false);
+
+    const root_cmd = app.root();
+    root_cmd.setHooks(.{ .run = runServer });
+
+    try root_cmd.addFlag(?[]const u8, .{
+        .name = "config-path",
+        .brief = "Set path to the 'zls.json' configuration file",
+        .value_hint = "PATH",
+    });
+    try root_cmd.addFlag(?[]const u8, .{
+        .name = "log-file",
+        .brief = "Set path to the 'zls.log' log file",
+        .value_hint = "PATH",
+    });
+    try root_cmd.addFlag(?std.log.Level, .{
+        .name = "log-level",
+        .brief = "The log level to be used (defaults to 'debug' in debug builds, 'info' otherwise)",
+    });
+    try root_cmd.addFlag(bool, .{
+        .name = "enable-stderr-logs",
+        .brief = "Write log messages to stderr",
+        .default = false,
+    });
+    try root_cmd.addFlag(bool, .{
+        .name = "disable-lsp-logs",
+        .brief = "Disable LSP 'window/logMessage' messages",
+        .default = false,
+    });
+
+    const env_cmd = try root_cmd.addSubcommand(.{
+        .name = "env",
+        .brief = "Print config path, log path and version",
+    });
+    env_cmd.setHooks(.{ .run = runEnvCommand });
+
+    app.executeProcess(init.minimal.args) catch |err| {
+        // Fangz already prints a friendly diagnostic for parse errors; avoid also dumping a
+        // raw error return trace for user input mistakes.
+        if (isFangzParseError(err)) return 1;
+        return err;
+    };
+
+    return startup_context.exit_status;
+}
+
+fn isFangzParseError(err: anyerror) bool {
+    const entries = @typeInfo(fangz.Parser.ParseError).error_set orelse return false;
+    inline for (entries) |entry| {
+        if (err == @field(fangz.Parser.ParseError, entry.name)) return true;
     }
+    return false;
 }
