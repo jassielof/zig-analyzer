@@ -295,6 +295,10 @@ fn symbolReferences(
         .function_parameter => |payload| payload.func,
         .label => unreachable, // handled separately by labelReferences
         .error_token => return .empty,
+        // Find-references/rename isn't supported for `.zon` documents (see the `handle.tree.mode
+        // == .zon` guards throughout Server.zig); a `zon_field` can only be reached here via some
+        // other path we haven't anticipated, so degrade gracefully instead of crashing.
+        .zon_field => return .empty,
     };
 
     var builder: Builder = .{

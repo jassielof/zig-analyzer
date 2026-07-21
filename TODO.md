@@ -25,3 +25,5 @@
 - [ ] **Test gutter icons** for test cases. By single projects, each project can be easily filtered and run individually with `zig test --filterflag "test ID"`, but if that test module depends on another module, this zig test breaks, so it's not possible to run that test individually for projects with dependencies. This needs to be marked as FIXME, for a robust workaround once it's possible, specially because for test modules, it's not possible to run a single test case, unless we add an option filter within the build filter, we could suggest the user (throw a warn, etc.)
 - [x] Build steps from the script should be actionable, as in a code lens for each build step.
 - [x] For each manifest dependency, if the dependency it's Zig-based or has as zig manfiest (build.zig.zon), the version should be displayed.
+- [x] `@import()` doesn't seem to be able to suggest `.zon` files, nor to resolve its types, fix this.
+- [ ] `@import("root")` is buggy (https://codeberg.org/ziglang/vscode-zig/issues/510).

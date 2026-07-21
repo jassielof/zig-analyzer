@@ -95,6 +95,14 @@ pub const Declaration = union(enum) {
     /// always an identifier
     /// used as child declarations of an error set declaration
     error_token: Ast.TokenIndex,
+    /// A named field of a ZON struct-init value, e.g. `version` in `.{ .version = "1.0" }`.
+    /// Struct-init fields aren't `container_field` nodes (they're just the value expression,
+    /// with the name recovered from the preceding `.name =` tokens), so unlike `.ast_node` this
+    /// stores the name token explicitly instead of deriving it from the node's tag.
+    zon_field: struct {
+        name_token: Ast.TokenIndex,
+        value_node: Ast.Node.Index,
+    },
 
     comptime {
         for (std.meta.fields(Declaration)) |field| {
@@ -206,6 +214,7 @@ pub const Declaration = union(enum) {
             .for_loop_payload => |payload| payload.identifier,
             .label => |payload| payload.identifier,
             .error_token => |error_token| error_token,
+            .zon_field => |payload| payload.name_token,
             .assign_destructure => |payload| {
                 const var_decl_node = payload.getVarDeclNode(tree);
                 const varDecl = tree.fullVarDecl(var_decl_node).?;
@@ -508,12 +517,70 @@ pub fn init(allocator: std.mem.Allocator, tree: *const Ast) error{OutOfMemory}!D
                 .{ .ast_node = root_node },
                 .{ .start = 0, .end = @intCast(tree.source.len) },
             );
-            try walkNode(&context, tree, root_node);
+            try walkZonStructInitFields(&context, tree, root_node, new_scope);
             try new_scope.finalize();
         },
     }
 
     return document_scope;
+}
+
+test "init - zon struct-init fields become declarations" {
+    const allocator = std.testing.allocator;
+
+    const source: [:0]const u8 =
+        \\.{
+        \\    .name = .my_package,
+        \\    .version = "1.0.0",
+        \\    .dependencies = .{
+        \\        .docent = .{
+        \\            .path = "dependencies/docent",
+        \\        },
+        \\    },
+        \\    .paths = .{
+        \\        "build.zig",
+        \\        "build.zig.zon",
+        \\    },
+        \\}
+    ;
+
+    var tree = try Ast.parse(allocator, source, .zon);
+    defer tree.deinit(allocator);
+    try std.testing.expectEqual(0, tree.errors.len);
+
+    var doc_scope = try DocumentScope.init(allocator, &tree);
+    defer doc_scope.deinit(allocator);
+
+    // the root scope has exactly the top-level fields, not any nested ones
+    try std.testing.expect(doc_scope.declaration_lookup_map.contains(.{ .scope = .root, .name = "name", .kind = .field }));
+    try std.testing.expect(doc_scope.declaration_lookup_map.contains(.{ .scope = .root, .name = "version", .kind = .field }));
+    try std.testing.expect(doc_scope.declaration_lookup_map.contains(.{ .scope = .root, .name = "dependencies", .kind = .field }));
+    try std.testing.expect(doc_scope.declaration_lookup_map.contains(.{ .scope = .root, .name = "paths", .kind = .field }));
+    try std.testing.expect(!doc_scope.declaration_lookup_map.contains(.{ .scope = .root, .name = "docent", .kind = .field }));
+    try std.testing.expect(!doc_scope.declaration_lookup_map.contains(.{ .scope = .root, .name = "path", .kind = .field }));
+
+    // nested struct-inits (but not array-inits, which have no named fields) get their own scope
+    // with their own declarations, findable regardless of nesting depth
+    var found_docent = false;
+    var found_path = false;
+    for (doc_scope.declaration_lookup_map.keys()) |key| {
+        if (key.kind != .field) continue;
+        if (std.mem.eql(u8, key.name, "docent")) found_docent = true;
+        if (std.mem.eql(u8, key.name, "path")) found_path = true;
+    }
+    try std.testing.expect(found_docent);
+    try std.testing.expect(found_path);
+
+    // the `dependencies` field is a `zon_field` declaration whose value node is the nested
+    // struct-init containing `docent`
+    const dependencies_index = doc_scope.declaration_lookup_map.getIndex(.{ .scope = .root, .name = "dependencies", .kind = .field }).?;
+    const dependencies_decl = doc_scope.declarations.get(dependencies_index);
+    try std.testing.expect(dependencies_decl == .zon_field);
+
+    var buffer: [2]Ast.Node.Index = undefined;
+    const dependencies_struct_init = tree.fullStructInit(&buffer, dependencies_decl.zon_field.value_node) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(1, dependencies_struct_init.ast.fields.len);
 }
 
 pub fn deinit(scope: *DocumentScope, allocator: std.mem.Allocator) void {
@@ -818,6 +885,64 @@ noinline fn walkContainerDecl(
     }
 
     try scope.finalize();
+}
+
+/// Registers a `zon_field` declaration in `scope` for each named field of the ZON struct-init
+/// value at `node_idx` (a no-op if `node_idx` isn't a struct-init, e.g. a bare array or scalar
+/// ZON root), and recurses into every field's value to register scopes for any nested
+/// struct-init values via `walkZonValue`.
+fn walkZonStructInitFields(
+    context: *ScopeContext,
+    tree: *const Ast,
+    node_idx: Ast.Node.Index,
+    scope: ScopeContext.PushedScope,
+) error{OutOfMemory}!void {
+    var buffer: [2]Ast.Node.Index = undefined;
+    const struct_init = tree.fullStructInit(&buffer, node_idx) orelse return;
+
+    for (struct_init.ast.fields) |value_node| {
+        // `value_node` is the value of `.name = value`; math our way two token indexes back to
+        // find `name` (there is no dedicated AST node for a struct-init field).
+        const name_token = tree.firstToken(value_node) - 2;
+        if (tree.tokenTag(name_token) == .identifier) {
+            try scope.pushDeclaration(name_token, .{ .zon_field = .{
+                .name_token = name_token,
+                .value_node = value_node,
+            } }, .field);
+        }
+        try walkZonValue(context, tree, value_node);
+    }
+}
+
+/// Walks a ZON value node, creating a `.container` scope (populated via
+/// `walkZonStructInitFields`) for every nested struct-init reachable from it, and recursing
+/// (without creating a scope, since array elements aren't named) into array-init elements.
+/// Leaves (strings, numbers, ...) are a no-op. This lets `innermostContainer` resolve the type
+/// of a nested `@import("*.zon")` field access, mirroring how `.zig` containers get a scope for
+/// every nested `struct { ... }`.
+fn walkZonValue(
+    context: *ScopeContext,
+    tree: *const Ast,
+    node_idx: Ast.Node.Index,
+) error{OutOfMemory}!void {
+    var buffer: [2]Ast.Node.Index = undefined;
+
+    if (tree.fullStructInit(&buffer, node_idx) != null) {
+        const scope = try context.startScope(
+            .container,
+            .{ .ast_node = node_idx },
+            locToSmallLoc(offsets.nodeToLoc(tree, node_idx)),
+        );
+        try walkZonStructInitFields(context, tree, node_idx, scope);
+        try scope.finalize();
+        return;
+    }
+
+    if (tree.fullArrayInit(&buffer, node_idx)) |array_init| {
+        for (array_init.ast.elements) |element| {
+            try walkZonValue(context, tree, element);
+        }
+    }
 }
 
 noinline fn walkErrorSetNode(

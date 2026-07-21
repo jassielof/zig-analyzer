@@ -71,6 +71,11 @@ fn hoverSymbol(
         .label,
         .error_token,
         => tree.tokenSlice(decl_handle.nameToken()),
+        .zon_field => |payload| offsets.locToSlice(tree.source, offsets.tokensToLoc(
+            tree,
+            payload.name_token - 1, // include the leading `.`
+            ast.lastToken(tree, payload.value_node),
+        )),
     };
 
     const hover_text = try hoverSymbolResolvedType(

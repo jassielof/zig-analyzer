@@ -280,9 +280,11 @@ fn declToCompletion(builder: *Builder, decl_handle: Analyser.DeclWithHandle) Ana
         .assign_destructure,
         .switch_payload,
         .switch_inline_tag_payload,
+        .zon_field,
         => {
             var kind: types.completion.Item.Kind = blk: {
                 const parent_is_type_val = if (decl_handle.container_type) |container_ty| container_ty.is_type_val else null;
+                if (decl_handle.decl == .zon_field) break :blk .Field;
                 if (decl_handle.decl == .ast_node)
                     switch (decl_handle.handle.tree.nodeTag(decl_handle.decl.ast_node)) {
                         .container_field_init,
@@ -991,17 +993,20 @@ fn completeFileSystemStringLiteral(builder: *Builder, pos_context: Analyser.Posi
 
         while (it.next(io)) |opt_entry| {
             const entry = opt_entry orelse break;
-            const expected_extension = switch (pos_context) {
-                .import_string_literal => ".zig",
-                .cinclude_string_literal => ".h",
-                .embedfile_string_literal => null,
-                .string_literal => null,
+            const expected_extensions: []const []const u8 = switch (pos_context) {
+                // `@import` accepts both Zig source files and ZON data files.
+                .import_string_literal => &.{ ".zig", ".zon" },
+                .cinclude_string_literal => &.{".h"},
+                .embedfile_string_literal => &.{},
+                .string_literal => &.{},
                 else => unreachable,
             };
             switch (entry.kind) {
-                .file => if (expected_extension) |expected| {
+                .file => if (expected_extensions.len != 0) {
                     const actual_extension = std.Io.Dir.path.extension(entry.name);
-                    if (!std.mem.eql(u8, actual_extension, expected)) continue;
+                    for (expected_extensions) |expected| {
+                        if (std.mem.eql(u8, actual_extension, expected)) break;
+                    } else continue;
                 },
                 .directory => {},
                 else => continue,

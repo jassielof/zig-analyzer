@@ -2409,14 +2409,21 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, options: ResolveOptions) Error
 
                     const string_literal = tree.tokenSlice(tree.nodeMainToken(import_param));
                     const import_string = string_literal[1 .. string_literal.len - 1];
-                    if (std.mem.endsWith(u8, import_string, ".zon")) {
-                        // TODO
-                        return null;
-                    }
 
-                    if (try analyser.resolveImportString(handle, import_string)) |ty| return ty;
-                    if (try analyser.resolveImportString(analyser.root_handle orelse return null, import_string)) |ty| return ty;
-                    return null;
+                    const import_ty = blk: {
+                        if (try analyser.resolveImportString(handle, import_string)) |ty| break :blk ty;
+                        if (try analyser.resolveImportString(analyser.root_handle orelse return null, import_string)) |ty| break :blk ty;
+                        return null;
+                    };
+
+                    // `@import` of a `.zig` file returns that file's struct *type*, but
+                    // `@import` of a `.zon` file returns the *value* of its literal (see the
+                    // language reference on `@import`), so unwrap the container type value that
+                    // `resolveImportString` produces into an instance of it.
+                    if (std.mem.endsWith(u8, import_string, ".zon")) {
+                        return try import_ty.instanceTypeVal(analyser);
+                    }
+                    return import_ty;
                 },
                 .c_import => {
                     if (!DocumentStore.supports_build_system) return null;
@@ -3038,7 +3045,20 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, options: ResolveOptions) Error
         .struct_init_dot_two_comma,
         .struct_init_dot,
         .struct_init_dot_comma,
-        => {},
+        => {
+            // Untyped struct-init literals only get a synthesized (anonymous) type here inside
+            // `.zon` documents, where `DocumentScope` registers a `.container` scope with
+            // `zon_field` declarations for every struct-init node (see `walkZonStructInitFields`
+            // in DocumentScope.zig) — that's what `innermostContainer` looks up below. Plain
+            // `.zig` anonymous struct literals (e.g. `.{ .a = 1 }` inside a function body) are
+            // intentionally left unresolved, since no such scope exists for them and
+            // `innermostContainer` would otherwise incorrectly fall back to whatever container
+            // happens to enclose that source position.
+            if (tree.mode == .zon) {
+                const container_ty = try analyser.innermostContainer(handle, tree.tokenStart(tree.firstToken(node)));
+                return try container_ty.instanceTypeVal(analyser);
+            }
+        },
 
         .root,
         .test_decl,
@@ -4782,6 +4802,24 @@ pub const Type = struct {
                         }
                     },
 
+                    // A ZON struct-init value (`.{ .foo = bar }`), synthesized as a `.container`
+                    // scope for `.zon` documents only (see `walkZonValue` in DocumentScope.zig).
+                    .struct_init_dot_two,
+                    .struct_init_dot_two_comma,
+                    .struct_init_dot,
+                    .struct_init_dot_comma,
+                    => {
+                        if (!options.truncate_container_decls) {
+                            try writer.writeAll(offsets.nodeToSlice(tree, node));
+                            return;
+                        }
+
+                        var struct_init_buffer: [2]Ast.Node.Index = undefined;
+                        const struct_init = tree.fullStructInit(&struct_init_buffer, node).?;
+
+                        try writer.writeAll(if (struct_init.ast.fields.len == 0) "struct {}" else "struct {...}");
+                    },
+
                     else => unreachable,
                 }
             },
@@ -5766,7 +5804,9 @@ pub const DeclWithHandle = struct {
 
             .label,
             .error_token,
-            => return null,
+            .zon_field,
+            => return null, // ZON fields never have an explicit type specifier
+
         }
     }
 
@@ -5815,6 +5855,7 @@ pub const DeclWithHandle = struct {
             .switch_inline_tag_payload,
             .label,
             .error_token,
+            .zon_field,
             => true,
         };
     }
@@ -5829,6 +5870,7 @@ pub const DeclWithHandle = struct {
             .label,
             .error_token,
             .switch_inline_tag_payload,
+            .zon_field,
             => false,
             inline .optional_payload,
             .for_loop_payload,
@@ -5848,6 +5890,7 @@ pub const DeclWithHandle = struct {
                 return try collectDocComments(allocator, tree, doc_comments, false);
             },
             .error_token => |token| try getDocCommentsBeforeToken(allocator, tree, token),
+            .zon_field => |payload| try getDocCommentsBeforeToken(allocator, tree, payload.name_token),
             else => null,
         };
     }
@@ -6030,6 +6073,10 @@ pub const DeclWithHandle = struct {
                 return null;
             },
             .error_token => return null,
+            .zon_field => |pay| try analyser.resolveTypeOfNodeInternal(.{
+                .node_handle = .of(pay.value_node, self.handle),
+                .container_type = self.container_type,
+            }),
         } orelse return null;
 
         if (self.container_type) |container_ty| {
