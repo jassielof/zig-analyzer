@@ -20,6 +20,17 @@ let codeLensProvider: ZigBuildCodeLensProvider | undefined;
 let zonCodeLensProvider: ZonCodeLensProvider | undefined;
 let bundledServerPath: string | undefined;
 
+const docCommentEnterRules: vscode.OnEnterRule[] = [
+  {
+    beforeText: /^\s*\/\/\/.*$/,
+    action: { indentAction: vscode.IndentAction.None, appendText: "/// " },
+  },
+  {
+    beforeText: /^\s*\/\/\!.*$/,
+    action: { indentAction: vscode.IndentAction.None, appendText: "//! " },
+  },
+];
+
 export function activate(context: vscode.ExtensionContext): void {
   bundledServerPath = path.join(
     context.extensionPath,
@@ -32,6 +43,12 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     codeLensProvider,
     zonCodeLensProvider,
+    // Register at activation as well as declaring it in language-configuration.json.
+    // This keeps continuation working if another Zig extension also contributes the
+    // `zig` language ID and its language configuration wins during startup.
+    vscode.languages.setLanguageConfiguration("zig", {
+      onEnterRules: docCommentEnterRules,
+    }),
     vscode.languages.registerCodeLensProvider(
       [{ language: "zig", scheme: "file" }],
       codeLensProvider,

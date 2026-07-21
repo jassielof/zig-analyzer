@@ -293,6 +293,13 @@
         "title": "Zig Analyzer: Run Zig File"
       }
     ],
+    "keybindings": [
+      {
+        "command": "editor.action.insertLineAfter",
+        "key": "shift+enter",
+        "when": "editorTextFocus && editorLangId == zig"
+      }
+    ],
     "menus": {
       "commandPalette": [
         {
