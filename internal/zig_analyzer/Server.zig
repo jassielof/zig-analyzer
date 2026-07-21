@@ -4,7 +4,7 @@
 //! - many Request handlers defined here. Except for the major ones which are in `src/features`
 
 const Server = @This();
-
+const builtin = @import("builtin");
 const std = @import("std");
 const zig_builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -1016,7 +1016,7 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
             server.showMessage(
                 .Warning,
                 "ZLS '{f}' requires at least Zig '{s}' but got Zig '{f}'. Update Zig to avoid unexpected behavior.",
-                .{ zls_version, build_options.minimum_runtime_zig_version_string, zig_version },
+                .{ zls_version, builtin.zig_version_string, zig_version },
             );
         }
     }

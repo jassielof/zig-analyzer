@@ -19,7 +19,6 @@ pub fn build(b: *std.Build) !void {
 
         build_options.addOption(std.SemanticVersion, "version", resolved_version);
         build_options.addOption([]const u8, "version_string", b.fmt("{f}", .{resolved_version}));
-        build_options.addOption([]const u8, "minimum_runtime_zig_version_string", builtin.zig_version_string);
 
         break :blk build_options.createModule();
     };
