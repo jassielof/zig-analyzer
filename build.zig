@@ -47,7 +47,8 @@ pub fn build(b: *std.Build) !void {
         // Output is cached by the Zig build system keyed on the command line
         // (including the docs URL / compiler version).
         const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{builtin.zig_version_string});
-        const markitdown = b.addSystemCommand(&.{"markitdown"});
+        const markitdown = b.addSystemCommand(&.{"uv"});
+        markitdown.addArgs(&.{"run", "markitdown"});
         markitdown.setName("markitdown langref");
         markitdown.addArg("--output");
         const langref_md = markitdown.addOutputFileArg("langref.md");

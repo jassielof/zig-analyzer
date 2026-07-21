@@ -35,10 +35,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Type check
         run: pnpm run typecheck
-      - name: Package
-        run: pnpm run package
       - name: Set up Zig
         uses: jassielof/setup-zig@main
+      - name: Package
+        run: pnpm run package
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
