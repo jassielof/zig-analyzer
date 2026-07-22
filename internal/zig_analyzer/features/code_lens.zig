@@ -46,6 +46,16 @@ pub fn codeLensHandler(
     return lenses.items;
 }
 
+/// Converts an arbitrary LSP-typed value into `types.LSPAny` (`std.json.Value`) for use as a
+/// client-command argument, by round-tripping it through JSON.
+fn toLspAny(arena: std.mem.Allocator, value: anytype) error{OutOfMemory}!types.LSPAny {
+    const json_text = try std.json.Stringify.valueAlloc(arena, value, .{ .emit_null_optional_fields = false });
+    return std.json.parseFromSliceLeaky(std.json.Value, arena, json_text, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+}
+
 fn isBuildZig(uri_raw: []const u8) bool {
     return std.mem.endsWith(u8, uri_raw, "/build.zig") or std.mem.endsWith(u8, uri_raw, "\\build.zig");
 }
@@ -79,11 +89,23 @@ fn collectReferenceLenses(
             .{ count, if (count == 1) "" else "s" },
         );
 
+        // Mirrors the "N references" lens VS Code shows for TS/JS: clicking opens the built-in
+        // Peek References view. `editor.action.showReferences` is a VS Code built-in that expects
+        // real vscode.Uri/Position/Location values, not the plain LSP-shaped JSON this server can
+        // send - so this goes through a client-registered command (`zigAnalyzer.showReferences`,
+        // see extension.ts) that does that conversion before calling the built-in.
+        const name_token = decl.nameToken();
+        const command_args = try arena.alloc(types.LSPAny, 3);
+        command_args[0] = .{ .string = handle.uri.raw };
+        command_args[1] = try toLspAny(arena, offsets.tokenToPosition(&handle.tree, name_token, server.offset_encoding));
+        command_args[2] = try toLspAny(arena, locs.items);
+
         try lenses.append(arena, .{
-            .range = offsets.tokenToRange(&handle.tree, decl.nameToken(), server.offset_encoding),
+            .range = offsets.tokenToRange(&handle.tree, name_token, server.offset_encoding),
             .command = .{
                 .title = title,
-                .command = "",
+                .command = "zigAnalyzer.showReferences",
+                .arguments = command_args,
             },
         });
     }

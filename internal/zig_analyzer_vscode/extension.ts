@@ -81,6 +81,11 @@ export function activate(context: vscode.ExtensionContext): void {
       "zigAnalyzer.insertPlainLineAfter",
       () => insertPlainLineAfter(),
     ),
+    vscode.commands.registerCommand(
+      "zigAnalyzer.showReferences",
+      (uri: string, position: LspPosition, locations: LspLocation[]) =>
+        showReferences(uri, position, locations),
+    ),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("zigAnalyzer.zigPath")) {
         zonCodeLensProvider?.refresh(); // the cached global package cache dir came from the old zigPath
@@ -257,6 +262,48 @@ interface BuildStep {
   name: string;
   description: string;
   isDefault: boolean;
+}
+
+/// LSP-wire-shaped `Position`/`Location`, as sent in `zigAnalyzer.showReferences`'s command
+/// arguments — plain JSON, not the `vscode.Position`/`vscode.Location` classes this command
+/// converts them into before calling the `editor.action.showReferences` built-in.
+interface LspPosition {
+  line: number;
+  character: number;
+}
+
+interface LspLocation {
+  uri: string;
+  range: { start: LspPosition; end: LspPosition };
+}
+
+function toVscodePosition(position: LspPosition): vscode.Position {
+  return new vscode.Position(position.line, position.character);
+}
+
+/// Reference-count code lenses ("N references") call this to open the built-in Peek References
+/// view, mirroring the clickable reference-count lens VS Code shows for TS/JS.
+async function showReferences(
+  uri: string,
+  position: LspPosition,
+  locations: LspLocation[],
+): Promise<void> {
+  const vscodeLocations = locations.map(
+    (loc) =>
+      new vscode.Location(
+        vscode.Uri.parse(loc.uri),
+        new vscode.Range(
+          toVscodePosition(loc.range.start),
+          toVscodePosition(loc.range.end),
+        ),
+      ),
+  );
+  await vscode.commands.executeCommand(
+    "editor.action.showReferences",
+    vscode.Uri.parse(uri),
+    toVscodePosition(position),
+    vscodeLocations,
+  );
 }
 
 const DEFAULT_SUFFIX = " (default)";
