@@ -15,6 +15,7 @@
   "zigAnalyzer.inlayHints.hideRedundantParamNamesLastToken": true,
   "zigAnalyzer.unusedDeclDiagnostics": true,
   "zigAnalyzer.formatter.enable": true,
+  "zigAnalyzer.namingConventionDiagnostics": true,
   "[zig]": {
     "editor.defaultFormatter": "jassielof.zig-analyzer"
   }
