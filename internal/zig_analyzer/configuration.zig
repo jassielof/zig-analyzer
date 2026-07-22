@@ -770,12 +770,12 @@ fn applyZigAnalyzerSection(section: ZigAnalyzerSection, cfg: *UnresolvedConfig) 
     }
     if (section.formatter) |formatter| {
         if (formatter.enable) |enable| cfg.enable_formatting = enable;
+        // VS Code has no way to distinguish "never touched" from "explicitly set to empty" for a
+        // plain string setting - `formatter.command` defaults to "" either way - so an empty
+        // string here can't be treated as "disable formatting", only as "no override". Use
+        // `formatter.enable = false` to disable formatting.
         if (formatter.command) |command| {
-            if (command.len == 0) {
-                cfg.enable_formatting = false;
-            } else {
-                cfg.formatter_command = command;
-            }
+            if (command.len != 0) cfg.formatter_command = command;
         }
         if (formatter.args) |args| cfg.formatter_args = args;
     }

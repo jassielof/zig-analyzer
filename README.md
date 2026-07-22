@@ -48,7 +48,7 @@ By default, "Format Document" uses the built-in formatter (matching `zig fmt`). 
 }
 ```
 
-Set `"zigAnalyzer.formatter.enable": false` (or clear `formatter.command` to `""`) to disable server-side formatting.
+Set `"zigAnalyzer.formatter.enable": false` to disable server-side formatting.
 
 **Contract your formatter must follow** — this is a hard requirement, not a suggestion, since the server pipes text through it directly with no validation of the output beyond "did it exit 0":
 
