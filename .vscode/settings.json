@@ -10,5 +10,12 @@
   "zigAnalyzer.serverPath": "${workspaceFolder}/zig-out/bin",
   "files.exclude": {
     "server": true
+  },
+  "zigAnalyzer.inlayHints.hideRedundantParamNames": true,
+  "zigAnalyzer.inlayHints.hideRedundantParamNamesLastToken": true,
+  "zigAnalyzer.unusedDeclDiagnostics": true,
+  "zigAnalyzer.formatter.enable": true,
+  "[zig]": {
+    "editor.defaultFormatter": "jassielof.zig-analyzer"
   }
 }
