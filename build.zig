@@ -2,9 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const fangz_build = @import("fangz");
-const lsp_build = @import("build/lsp.zig");
-const version_build = @import("build/version.zig");
-const zig_analyzer_build = @import("build/zig_analyzer.zig");
 
 const package_version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch unreachable;
 
@@ -12,7 +9,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const resolved_version = version_build.getVersion(b, package_version);
+    const resolved_version = getVersion(b, package_version);
 
     const build_options = blk: {
         const build_options = b.addOptions();
@@ -108,24 +105,126 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    const lsp_types_output_file = lsp_build.runCodegen(b);
+    const lsp_types_output_file = blk: {
+        // The LSP metaModel.json (~16k lines) isn't vendored: it's fetched with Zig's own
+        // std.http.Client (see tools/fetch_file) and cached by the Zig build system, keyed on
+        // the command line (including this URL) - same caching story as the langref fetch above.
+        const fetch_exe = b.addExecutable(.{
+            .name = "zig_analyzer_fetch_file",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/fetch_file/main.zig"),
+                .target = b.graph.host,
+                .single_threaded = true,
+            }),
+        });
 
-    const lsp_modules = lsp_build.createLspModules(b, lsp_types_output_file, .{
+        const fetch_meta_model = b.addRunArtifact(fetch_exe);
+        fetch_meta_model.setName("fetch LSP metaModel.json");
+        fetch_meta_model.addArg("https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/metaModel/metaModel.json");
+        const meta_model_json = fetch_meta_model.addOutputFileArg("metaModel.json");
+
+        const codegen_exe = b.addExecutable(.{
+            .name = "lsp-codegen",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/lsp_types_gen/main.zig"),
+                .target = b.graph.host,
+                .single_threaded = true,
+            }),
+        });
+        codegen_exe.root_module.addAnonymousImport("meta-model", .{ .root_source_file = meta_model_json });
+
+        const run_codegen = b.addRunArtifact(codegen_exe);
+        const output_file = run_codegen.addOutputFileArg("lsp_types.zig");
+
+        const codegen_step = b.step("codegen", "Install LSP types generated from the meta model");
+        codegen_step.dependOn(&b.addInstallFile(output_file, "lsp_types.zig").step);
+
+        break :blk output_file;
+    };
+
+    const json_rpc_module = b.createModule(.{
+        .root_source_file = b.path("lib/json_rpc/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    lsp_build.addDocsStep(b, lsp_modules.lsp);
-    b.modules.put(b.allocator, "lsp", lsp_modules.lsp) catch @panic("OOM");
-    b.modules.put(b.allocator, "json_rpc", lsp_modules.json_rpc) catch @panic("OOM");
 
-    const zig_analyzer_module = zig_analyzer_build.createZigAnalyzerModule(b, .{
+    // `lib/lsp/parser.zig` (generic `std.json` (de)serialization helpers: `Map`, `UnionParser`,
+    // `EnumCustomStringValues`, `EnumStringifyAsInt`) conceptually belongs to the LSP library, not
+    // JSON-RPC - it's used by the LSP protocol type definitions (below) and re-exported as
+    // `lsp.parser`, but never by lib/json_rpc. It still has to be its own module rather than a
+    // plain relative import from `lib/lsp/root.zig`, though: the *generated* `lsp_types_module`
+    // (rooted at `lsp_types_output_file`, which lives outside `lib/lsp/`) can only reach it via a
+    // named module import, and Zig doesn't allow a single file to belong to two different modules
+    // at once - so `lsp_module` has to import this same module instance too, rather than reaching
+    // the file relatively.
+    const lsp_parser_module = b.createModule(.{
+        .root_source_file = b.path("lib/lsp/parser.zig"),
         .target = target,
         .optimize = optimize,
-        .lsp_module = lsp_modules.lsp,
-        .json_rpc_module = lsp_modules.json_rpc,
-        .build_options = build_options,
-        .version_data = version_data_module,
     });
+
+    const lsp_types_module = b.createModule(.{
+        .root_source_file = lsp_types_output_file,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "parser", .module = lsp_parser_module },
+            .{ .name = "json_rpc", .module = json_rpc_module },
+        },
+    });
+
+    const lsp_module = b.createModule(.{
+        .root_source_file = b.path("lib/lsp/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "parser", .module = lsp_parser_module },
+            .{ .name = "types", .module = lsp_types_module },
+            .{ .name = "json_rpc", .module = json_rpc_module },
+        },
+    });
+
+    { // zig build lsp-docs
+        const autodoc_exe = b.addObject(.{
+            .name = "lsp",
+            .root_module = lsp_module,
+        });
+
+        const install_docs = b.addInstallDirectory(.{
+            .source_dir = autodoc_exe.getEmittedDocs(),
+            .install_dir = .prefix,
+            .install_subdir = "doc/lsp",
+        });
+
+        const docs_step = b.step("lsp-docs", "Generate and install documentation for the lsp module");
+        docs_step.dependOn(&install_docs.step);
+    }
+
+    b.modules.put(b.allocator, "lsp", lsp_module) catch @panic("OOM");
+    b.modules.put(b.allocator, "json_rpc", json_rpc_module) catch @panic("OOM");
+
+    const dmp_module = b.dependency("dmp", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("dmp");
+
+    const zig_analyzer_module = b.createModule(.{
+        .root_source_file = b.path("internal/zig_analyzer/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "dmp", .module = dmp_module },
+            .{ .name = "lsp", .module = lsp_module },
+            .{ .name = "json_rpc", .module = json_rpc_module },
+            .{ .name = "build_options", .module = build_options },
+            .{ .name = "version_data", .module = version_data_module },
+        },
+    });
+
+    if (target.result.os.tag == .windows) {
+        zig_analyzer_module.linkSystemLibrary("advapi32", .{});
+    }
+
     b.modules.put(b.allocator, "zig_analyzer", zig_analyzer_module) catch @panic("OOM");
 
     const fangz_module = b.dependency("fangz", .{
@@ -147,7 +246,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "fangz", .module = fangz_module },
             .{ .name = "vereda", .module = vereda_module },
             .{ .name = "zig_analyzer", .module = zig_analyzer_module },
-            .{ .name = "json_rpc", .module = lsp_modules.json_rpc },
+            .{ .name = "json_rpc", .module = json_rpc_module },
         },
     });
 
@@ -179,6 +278,78 @@ pub fn build(b: *std.Build) !void {
         });
         test_step.dependOn(&b.addRunArtifact(src_tests).step);
 
-        lsp_build.addLspTests(b, test_step, lsp_modules);
+        const lsp_tests = b.addTest(.{
+            .root_module = lsp_module,
+        });
+
+        const json_rpc_tests = b.addTest(.{
+            .name = "test json_rpc",
+            .root_module = json_rpc_module,
+        });
+
+        const lsp_parser_tests = b.addTest(.{
+            .name = "test lsp parser",
+            .root_module = lsp_parser_module,
+        });
+
+        test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
+        test_step.dependOn(&b.addRunArtifact(json_rpc_tests).step);
+        test_step.dependOn(&b.addRunArtifact(lsp_parser_tests).step);
+    }
+}
+
+/// Returns `MAJOR.MINOR.PATCH-dev` when `git describe` failed.
+fn getVersion(b: *std.Build, base_version: std.SemanticVersion) std.SemanticVersion {
+    const version_string = b.option([]const u8, "version-string", "Override the version of this build. Must be a semantic version.");
+    if (version_string) |semver_string| {
+        return std.SemanticVersion.parse(semver_string) catch |err| {
+            std.debug.panic("Expected -Dversion-string={s} to be a semantic version: {}", .{ semver_string, err });
+        };
+    }
+
+    if (base_version.pre == null) return base_version;
+
+    const argv: []const []const u8 = &.{
+        "git", "-C", b.pathFromRoot("."), "--git-dir", ".git", "describe", "--match", "*.*.*", "--tags",
+    };
+    var code: u8 = undefined;
+    const git_describe_untrimmed = b.runAllowFail(argv, &code, .ignore) catch |err| {
+        const argv_joined = std.mem.join(b.allocator, " ", argv) catch @panic("OOM");
+        std.log.warn(
+            \\Failed to run git describe to resolve the version: {}
+            \\command: {s}
+            \\
+            \\Consider passing the -Dversion-string flag to specify the version.
+        , .{ err, argv_joined });
+        return base_version;
+    };
+
+    const git_describe = std.mem.trim(u8, git_describe_untrimmed, " \n\r");
+
+    switch (std.mem.count(u8, git_describe, "-")) {
+        0 => {
+            // Tagged release version (e.g. 0.10.0).
+            return base_version;
+        },
+        2 => {
+            // Untagged development build (e.g. 0.10.0-dev.216+34ce200).
+            var it = std.mem.splitScalar(u8, git_describe, '-');
+            const tagged_ancestor = it.first();
+            const commit_height = it.next().?;
+            const commit_id = it.next().?;
+            _ = tagged_ancestor;
+
+            return .{
+                .major = base_version.major,
+                .minor = base_version.minor,
+                .patch = base_version.patch,
+                .pre = b.fmt("dev.{s}", .{commit_height}),
+                .build = if (std.mem.startsWith(u8, commit_id, "g")) commit_id[1..] else commit_id,
+            };
+        },
+        else => {
+            std.debug.print("Unexpected 'git describe' output: '{s}'\n", .{git_describe});
+            return base_version;
+        },
     }
 }

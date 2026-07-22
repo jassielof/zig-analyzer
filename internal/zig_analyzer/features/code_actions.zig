@@ -364,7 +364,7 @@ pub fn collectAutoDiscardDiagnostics(
             .severity = .Information,
             .code = null,
             .source = "zig-analyzer",
-            .message = "auto discard for unused variable",
+            .message = .{ .string = "auto discard for unused variable" },
             .relatedInformation = related_info,
         });
     }

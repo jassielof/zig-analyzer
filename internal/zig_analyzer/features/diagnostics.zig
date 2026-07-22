@@ -197,7 +197,7 @@ fn collectUnusedDeclDiagnostics(
             .severity = .Hint,
             .code = .{ .string = "unused_decl" },
             .source = "zig-analyzer",
-            .message = try std.fmt.allocPrint(arena, "unused {s}", .{name}),
+            .message = .{ .string = try std.fmt.allocPrint(arena, "unused {s}", .{name}) },
             .tags = &.{.Unnecessary},
         });
     }
