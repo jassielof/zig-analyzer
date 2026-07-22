@@ -46,7 +46,15 @@ pub fn createLspModules(
         .optimize = options.optimize,
     });
 
-    // TODO: The parser shouldn't be a module itself, it shouldn't be imported, it should be part of the respective module it belongs, either JSON-RPC or the LSP library. 
+    // `lib/lsp/parser.zig` (generic `std.json` (de)serialization helpers: `Map`, `UnionParser`,
+    // `EnumCustomStringValues`, `EnumStringifyAsInt`) conceptually belongs to the LSP library, not
+    // JSON-RPC - it's used by the LSP protocol type definitions (below) and re-exported as
+    // `lsp.parser`, but never by lib/json_rpc. It still has to be its own module rather than a
+    // plain relative import from `lib/lsp/root.zig`, though: the *generated* `lsp_types_module`
+    // (rooted at `lsp_types_output_file`, which lives outside `lib/lsp/`) can only reach it via a
+    // named module import, and Zig doesn't allow a single file to belong to two different modules
+    // at once - so `lsp_module` has to import this same module instance too, rather than reaching
+    // the file relatively.
     const lsp_parser_module = b.createModule(.{
         .root_source_file = b.path("lib/lsp/parser.zig"),
         .target = options.target,
