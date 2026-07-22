@@ -208,12 +208,18 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     }).module("dmp");
 
+    const docent_module = b.dependency("docent", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("docent");
+
     const zig_analyzer_module = b.createModule(.{
         .root_source_file = b.path("internal/zig_analyzer/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "dmp", .module = dmp_module },
+            .{ .name = "docent", .module = docent_module },
             .{ .name = "lsp", .module = lsp_module },
             .{ .name = "json_rpc", .module = json_rpc_module },
             .{ .name = "build_options", .module = build_options },

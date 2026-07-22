@@ -15,6 +15,7 @@ const Uri = @import("../Uri.zig");
 const code_actions = @import("code_actions.zig");
 const DiagnosticsCollection = @import("../DiagnosticsCollection.zig");
 const references = @import("references.zig");
+const docent = @import("docent");
 
 const Zir = std.zig.Zir;
 
@@ -68,6 +69,16 @@ pub fn generateDiagnostics(
             defer analyser.deinit();
             try collectUnusedDeclDiagnostics(
                 &analyser,
+                handle,
+                arena,
+                &diagnostics,
+                server.offset_encoding,
+            );
+        }
+
+        if (config.enable_naming_convention_diagnostics and handle.tree.mode == .zig and handle.tree.errors.len == 0) {
+            try collectNamingConventionDiagnostics(
+                server.io,
                 handle,
                 arena,
                 &diagnostics,
@@ -199,6 +210,53 @@ fn collectUnusedDeclDiagnostics(
             .source = "zig-analyzer",
             .message = .{ .string = try std.fmt.allocPrint(arena, "unused {s}", .{name}) },
             .tags = &.{.Unnecessary},
+        });
+    }
+}
+
+/// Reuses docent's `identifier_case` rule (`dependencies/docent/internal/docent/rules/style/identifier_case.zig`)
+/// to flag identifiers that don't follow the Zig naming conventions (camelCase functions, PascalCase
+/// types, snake_case constants/fields/namespaces).
+fn collectNamingConventionDiagnostics(
+    io: std.Io,
+    handle: *DocumentStore.Handle,
+    arena: std.mem.Allocator,
+    diagnostics: *std.ArrayList(types.Diagnostic),
+    offset_encoding: offsets.Encoding,
+) error{OutOfMemory}!void {
+    // Only `file:` URIs resolve to a real filesystem path; the rule needs one to classify
+    // `@import("...")` targets (namespace vs. struct file) and to check the file's own name.
+    const file_path = handle.uri.toFsPath(arena) catch return;
+
+    var docent_diagnostics: std.ArrayList(docent.Diagnostic) = .empty;
+    try docent.rules.style.identifier_case.check(
+        &handle.tree,
+        .{},
+        file_path,
+        arena,
+        io,
+        arena,
+        &docent_diagnostics,
+    );
+
+    for (docent_diagnostics.items) |d| {
+        const start_index = offsets.positionToIndex(handle.tree.source, .{
+            .line = @intCast(d.line - 1),
+            .character = @intCast(d.column - 1),
+        }, .@"utf-8");
+        const loc: offsets.Loc = .{ .start = start_index, .end = start_index + d.symbol_len };
+
+        const message = if (d.subject) |subject|
+            try std.fmt.allocPrint(arena, "{s} '{s}' {s}", .{ subject.kind.label(), subject.name, d.detail orelse "does not follow the Zig naming conventions" })
+        else
+            d.detail orelse "does not follow the Zig naming conventions";
+
+        try diagnostics.append(arena, .{
+            .range = offsets.locToRange(handle.tree.source, loc, offset_encoding),
+            .severity = .Hint,
+            .code = .{ .string = d.rule },
+            .source = "zig-analyzer",
+            .message = .{ .string = message },
         });
     }
 }

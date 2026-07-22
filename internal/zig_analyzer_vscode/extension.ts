@@ -249,6 +249,7 @@ function getZigAnalyzerSettings(): Record<string, unknown> {
     },
     referenceCodeLenses: c.get("referenceCodeLenses"),
     unusedDeclDiagnostics: c.get("unusedDeclDiagnostics"),
+    namingConventionDiagnostics: c.get("namingConventionDiagnostics"),
     preferAstCheckAsChildProcess: c.get("preferAstCheckAsChildProcess"),
     builtinPath: c.get("builtinPath"),
     libPath: c.get("libPath"),

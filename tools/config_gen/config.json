@@ -133,6 +133,13 @@
             "vscode": "unusedDeclDiagnostics"
         },
         {
+            "name": "enable_naming_convention_diagnostics",
+            "description": "Report identifiers that don't follow the Zig naming conventions (camelCase functions, PascalCase types, snake_case constants/fields/namespaces) as hint diagnostics. Reuses docent's `identifier_case` rule.",
+            "type": "bool",
+            "default": true,
+            "vscode": "namingConventionDiagnostics"
+        },
+        {
             "name": "prefer_ast_check_as_child_process",
             "description": "Prefer running `zig ast-check` as a child process instead of the built-in AstGen path.",
             "type": "bool",

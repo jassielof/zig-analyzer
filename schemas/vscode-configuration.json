@@ -142,6 +142,12 @@
     "description": "Report unused private declarations as faded (Unnecessary) diagnostics. Public declarations are never reported.",
     "default": true
   },
+  "zigAnalyzer.namingConventionDiagnostics": {
+    "scope": "resource",
+    "type": "boolean",
+    "description": "Report identifiers that don't follow the Zig naming conventions (camelCase functions, PascalCase types, snake_case constants/fields/namespaces) as hint diagnostics. Reuses docent's `identifier_case` rule.",
+    "default": true
+  },
   "zigAnalyzer.preferAstCheckAsChildProcess": {
     "scope": "resource",
     "type": "boolean",

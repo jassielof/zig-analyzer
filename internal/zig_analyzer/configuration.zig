@@ -734,6 +734,7 @@ const ZigAnalyzerSection = struct {
     } = null,
     referenceCodeLenses: ?bool = null,
     unusedDeclDiagnostics: ?bool = null,
+    namingConventionDiagnostics: ?bool = null,
     preferAstCheckAsChildProcess: ?bool = null,
     builtinPath: ?[]const u8 = null,
     libPath: ?[]const u8 = null,
@@ -781,6 +782,7 @@ fn applyZigAnalyzerSection(section: ZigAnalyzerSection, cfg: *UnresolvedConfig) 
     }
     if (section.referenceCodeLenses) |v| cfg.enable_reference_code_lenses = v;
     if (section.unusedDeclDiagnostics) |v| cfg.enable_unused_decl_diagnostics = v;
+    if (section.namingConventionDiagnostics) |v| cfg.enable_naming_convention_diagnostics = v;
     if (section.preferAstCheckAsChildProcess) |v| cfg.prefer_ast_check_as_child_process = v;
     if (section.builtinPath) |v| {
         if (v.len != 0) cfg.builtin_path = v;
