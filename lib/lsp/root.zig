@@ -6,25 +6,13 @@ pub const parser = @import("parser");
 pub const offsets = @import("offsets.zig");
 pub const basic_server = @import("basic_server.zig");
 
-// Not re-exported: `json_rpc` is its own importable module (`@import("json_rpc")`), so consumers
-// that want it don't need to go through `lsp` for it. Kept as a private alias purely so the
-// individual re-exports below don't have to spell out `@import("json_rpc")` repeatedly.
+// `json_rpc` (message envelope types, Base Protocol framing, `Transport`) is not re-exported: it's
+// its own importable module (`@import("json_rpc")`), so consumers should depend on it directly
+// instead of reaching it through `lsp`. Kept as a private alias here because `Message` below (the
+// typed request/notification/response generic used to build `lsp`'s own message types) needs
+// `JsonRPCMessage` internally.
 const json_rpc = @import("json_rpc");
-
-pub const JsonRPCMessage = json_rpc.JsonRPCMessage;
-pub const TypedJsonRPCRequest = json_rpc.TypedJsonRPCRequest;
-pub const TypedJsonRPCNotification = json_rpc.TypedJsonRPCNotification;
-pub const TypedJsonRPCResponse = json_rpc.TypedJsonRPCResponse;
-pub const BaseProtocolHeader = json_rpc.BaseProtocolHeader;
-pub const Transport = json_rpc.Transport;
-pub const ThreadSafeTransportConfig = json_rpc.ThreadSafeTransportConfig;
-pub const ThreadSafeTransport = json_rpc.ThreadSafeTransport;
-pub const readJsonMessage = json_rpc.readJsonMessage;
-pub const writeJsonMessage = json_rpc.writeJsonMessage;
-pub const writeRequest = json_rpc.writeRequest;
-pub const writeNotification = json_rpc.writeNotification;
-pub const writeResponse = json_rpc.writeResponse;
-pub const writeErrorResponse = json_rpc.writeErrorResponse;
+const JsonRPCMessage = json_rpc.JsonRPCMessage;
 
 pub const minimum_logging_buffer_size: usize = 128;
 

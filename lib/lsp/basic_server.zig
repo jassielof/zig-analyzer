@@ -9,6 +9,7 @@
 //! Also see `examples/my_first_server.zig`.
 
 const std = @import("std");
+const json_rpc = @import("json_rpc");
 const lsp = @import("root.zig");
 const offsets = lsp.offsets;
 const types = lsp.types;
@@ -16,7 +17,7 @@ const types = lsp.types;
 pub fn run(
     io: std.Io,
     allocator: std.mem.Allocator,
-    transport: *lsp.Transport,
+    transport: *json_rpc.Transport,
     /// Must be a pointer to a container type (e.g. `struct`) that implements
     /// the desired LSP methods.
     ///
@@ -107,7 +108,7 @@ pub fn run(
                         );
                     } else |err| {
                         if (logErr) |log| log("Failed to handle '{s}' request: {}", .{ method, err });
-                        var code: lsp.JsonRPCMessage.Response.Error.Code = .internal_error;
+                        var code: json_rpc.JsonRPCMessage.Response.Error.Code = .internal_error;
                         for (
                             [_]Error{
                                 error.ParseError,
@@ -121,7 +122,7 @@ pub fn run(
                                 error.ContentModified,
                                 error.RequestCancelled,
                             },
-                            [_]lsp.JsonRPCMessage.Response.Error.Code{
+                            [_]json_rpc.JsonRPCMessage.Response.Error.Code{
                                 .parse_error,
                                 .invalid_request,
                                 .method_not_found,

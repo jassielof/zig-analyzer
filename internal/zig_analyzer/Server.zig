@@ -12,6 +12,7 @@ const Config = @import("Config.zig");
 const configuration = @import("configuration.zig");
 const DocumentStore = @import("DocumentStore.zig");
 const lsp = @import("lsp");
+const json_rpc = @import("json_rpc");
 const types = lsp.types;
 const Analyser = @import("analysis.zig");
 const offsets = @import("offsets.zig");
@@ -45,7 +46,7 @@ io: std.Io,
 allocator: std.mem.Allocator,
 config_manager: *configuration.Manager,
 document_store: DocumentStore,
-transport: ?*lsp.Transport = null,
+transport: ?*json_rpc.Transport = null,
 offset_encoding: offsets.Encoding = .@"utf-16",
 status: Status = .uninitialized,
 
@@ -146,24 +147,24 @@ pub const Status = enum {
     exiting_failure,
 };
 
-fn sendToClientResponse(server: *Server, id: lsp.JsonRPCMessage.ID, result: anytype) error{ Canceled, OutOfMemory }![]u8 {
+fn sendToClientResponse(server: *Server, id: json_rpc.JsonRPCMessage.ID, result: anytype) error{ Canceled, OutOfMemory }![]u8 {
     // TODO validate result type is a possible response
     // TODO validate response is from a client to server request
     // TODO validate result type
 
-    const response: lsp.TypedJsonRPCResponse(@TypeOf(result)) = .{
+    const response: json_rpc.TypedJsonRPCResponse(@TypeOf(result)) = .{
         .id = id,
         .result_or_error = .{ .result = result },
     };
     return try sendToClientInternal(server.io, server.allocator, server.transport, response);
 }
 
-fn sendToClientRequest(server: *Server, id: lsp.JsonRPCMessage.ID, method: []const u8, params: anytype) error{ Canceled, OutOfMemory }![]u8 {
+fn sendToClientRequest(server: *Server, id: json_rpc.JsonRPCMessage.ID, method: []const u8, params: anytype) error{ Canceled, OutOfMemory }![]u8 {
     // TODO validate method is a request
     // TODO validate method is server to client
     // TODO validate params type
 
-    const request: lsp.TypedJsonRPCRequest(@TypeOf(params)) = .{
+    const request: json_rpc.TypedJsonRPCRequest(@TypeOf(params)) = .{
         .id = id,
         .method = method,
         .params = params,
@@ -176,22 +177,22 @@ fn sendToClientNotification(server: *Server, method: []const u8, params: anytype
     // TODO validate method is server to client
     // TODO validate params type
 
-    const notification: lsp.TypedJsonRPCNotification(@TypeOf(params)) = .{
+    const notification: json_rpc.TypedJsonRPCNotification(@TypeOf(params)) = .{
         .method = method,
         .params = params,
     };
     return try sendToClientInternal(server.io, server.allocator, server.transport, notification);
 }
 
-fn sendToClientResponseError(server: *Server, id: lsp.JsonRPCMessage.ID, err: lsp.JsonRPCMessage.Response.Error) error{ Canceled, OutOfMemory }![]u8 {
-    const response: lsp.JsonRPCMessage = .{
+fn sendToClientResponseError(server: *Server, id: json_rpc.JsonRPCMessage.ID, err: json_rpc.JsonRPCMessage.Response.Error) error{ Canceled, OutOfMemory }![]u8 {
+    const response: json_rpc.JsonRPCMessage = .{
         .response = .{ .id = id, .result_or_error = .{ .@"error" = err } },
     };
 
     return try sendToClientInternal(server.io, server.allocator, server.transport, response);
 }
 
-fn sendToClientInternal(io: std.Io, allocator: std.mem.Allocator, transport: ?*lsp.Transport, message: anytype) error{ Canceled, OutOfMemory }![]u8 {
+fn sendToClientInternal(io: std.Io, allocator: std.mem.Allocator, transport: ?*json_rpc.Transport, message: anytype) error{ Canceled, OutOfMemory }![]u8 {
     const message_stringified = try std.json.Stringify.valueAlloc(allocator, message, .{
         .emit_null_optional_fields = false,
     });
@@ -1657,7 +1658,7 @@ pub const CreateOptions = struct {
     /// Must be thread-safe unless the ZLS module is in single_threaded mode or the Io implementation has no parallelism.
     allocator: std.mem.Allocator,
     /// Must be set when running `loop`. Controls how the server will send and receive messages.
-    transport: ?*lsp.Transport,
+    transport: ?*json_rpc.Transport,
     config_manager: *configuration.Manager,
 };
 
@@ -1705,7 +1706,7 @@ pub fn destroy(server: *Server) void {
     server.allocator.destroy(server);
 }
 
-pub fn setTransport(server: *Server, transport: *lsp.Transport) void {
+pub fn setTransport(server: *Server, transport: *json_rpc.Transport) void {
     server.transport = transport;
     server.diagnostics_collection.transport = transport;
     server.document_store.transport = transport;
@@ -1721,7 +1722,7 @@ pub fn keepRunning(server: *const Server) bool {
 pub const LoopError = std.mem.Allocator.Error ||
     std.Io.Cancelable ||
     std.Io.File.Reader.Error ||
-    lsp.BaseProtocolHeader.ParseError ||
+    json_rpc.BaseProtocolHeader.ParseError ||
     error{ EndOfStream, ParseError };
 
 /// The main loop of ZLS
@@ -1930,7 +1931,7 @@ fn validateMessage(server: *const Server, message: Message) Error!void {
     }
 }
 
-fn handleResponse(server: *Server, response: lsp.JsonRPCMessage.Response) Error!void {
+fn handleResponse(server: *Server, response: json_rpc.JsonRPCMessage.Response) Error!void {
     if (response.id == null) {
         log.warn("received response from client without id!", .{});
         return;

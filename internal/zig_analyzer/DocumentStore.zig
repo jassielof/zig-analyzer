@@ -7,6 +7,7 @@ const analysis = @import("analysis.zig");
 const offsets = @import("offsets.zig");
 const log = std.log.scoped(.store);
 const lsp = @import("lsp");
+const json_rpc = @import("json_rpc");
 const Ast = std.zig.Ast;
 const BuildAssociatedConfig = @import("BuildAssociatedConfig.zig");
 pub const BuildConfig = @import("build_runner/shared.zig").BuildConfig;
@@ -28,7 +29,7 @@ build_files: if (supports_build_system) Uri.ArrayHashMap(*BuildFile) else void =
 cimports: if (supports_build_system) std.array_hash_map.Auto(CImportHash, translate_c.Result) else void = if (supports_build_system) .empty else {},
 diagnostics_collection: *DiagnosticsCollection,
 builds_in_progress: std.atomic.Value(i32) = .init(0),
-transport: ?*lsp.Transport = null,
+transport: ?*json_rpc.Transport = null,
 lsp_capabilities: struct {
     supports_work_done_progress: bool = false,
     supports_semantic_tokens_refresh: bool = false,
@@ -959,7 +960,7 @@ const progress_token = "buildProgressToken";
 fn sendMessageToClient(
     io: std.Io,
     allocator: std.mem.Allocator,
-    transport: *lsp.Transport,
+    transport: *json_rpc.Transport,
     message: anytype,
 ) !void {
     const json_message = try std.json.Stringify.valueAlloc(
@@ -1116,7 +1117,7 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                 self.io,
                 self.allocator,
                 transport,
-                lsp.TypedJsonRPCRequest(?void){
+                json_rpc.TypedJsonRPCRequest(?void){
                     .id = .{ .string = "semantic_tokens_refresh" },
                     .method = "workspace/semanticTokens/refresh",
                     .params = @as(?void, null),
@@ -1131,7 +1132,7 @@ fn invalidateBuildFileWorker(self: *DocumentStore, build_file: *BuildFile) std.I
                 self.io,
                 self.allocator,
                 transport,
-                lsp.TypedJsonRPCRequest(?void){
+                json_rpc.TypedJsonRPCRequest(?void){
                     .id = .{ .string = "inlay_hints_refresh" },
                     .method = "workspace/inlayHint/refresh",
                     .params = @as(?void, null),

@@ -1,5 +1,6 @@
 const std = @import("std");
 const lsp = @import("lsp");
+const json_rpc = @import("json_rpc");
 const offsets = @import("offsets.zig");
 const Uri = @import("Uri.zig");
 
@@ -19,7 +20,7 @@ tag_set: std.array_hash_map.Auto(Tag, struct {
     }) = .empty,
 }) = .empty,
 outdated_files: Uri.ArrayHashMap(void) = .empty,
-transport: ?*lsp.Transport = null,
+transport: ?*json_rpc.Transport = null,
 offset_encoding: offsets.Encoding = .@"utf-16",
 
 const DiagnosticsCollection = @This();
@@ -271,7 +272,7 @@ pub fn publishDiagnostics(collection: *DiagnosticsCollection) (std.mem.Allocator
             var diagnostics: std.ArrayList(lsp.types.Diagnostic) = .empty;
             try collection.collectLspDiagnosticsForDocument(document_uri, collection.offset_encoding, arena_allocator.allocator(), &diagnostics);
 
-            const notification: lsp.TypedJsonRPCNotification(lsp.types.publish_diagnostics.Params) = .{
+            const notification: json_rpc.TypedJsonRPCNotification(lsp.types.publish_diagnostics.Params) = .{
                 .method = "textDocument/publishDiagnostics",
                 .params = .{
                     .uri = document_uri.raw,

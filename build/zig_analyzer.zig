@@ -6,6 +6,7 @@ pub fn createZigAnalyzerModule(
         target: std.Build.ResolvedTarget,
         optimize: std.builtin.OptimizeMode,
         lsp_module: *std.Build.Module,
+        json_rpc_module: *std.Build.Module,
         build_options: *std.Build.Module,
         version_data: *std.Build.Module,
     },
@@ -22,6 +23,7 @@ pub fn createZigAnalyzerModule(
         .imports = &.{
             .{ .name = "dmp", .module = dmp_module },
             .{ .name = "lsp", .module = options.lsp_module },
+            .{ .name = "json_rpc", .module = options.json_rpc_module },
             .{ .name = "build_options", .module = options.build_options },
             .{ .name = "version_data", .module = options.version_data },
         },

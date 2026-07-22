@@ -1,6 +1,7 @@
 const std = @import("std");
 const zig_builtin = @import("builtin");
 const zls = @import("zig_analyzer");
+const json_rpc = @import("json_rpc");
 const exe_options = @import("exe_options");
 const fangz = @import("fangz");
 const vereda = @import("vereda");
@@ -16,7 +17,7 @@ pub const std_options: std.Options = .{
 };
 
 /// Log messages with the LSP 'window/logMessage' message.
-var log_transport: ?*zls.lsp.Transport = null;
+var log_transport: ?*json_rpc.Transport = null;
 /// Log messages to stderr.
 var log_stderr: bool = true;
 /// Log messages to the given file.
@@ -407,14 +408,14 @@ fn runServer(ctx: *fangz.ParseContext) anyerror!void {
     };
 
     var read_buffer: [256]u8 = undefined;
-    var stdio_transport: zls.lsp.Transport.Stdio = .init(&read_buffer, .stdin(), .stdout());
+    var stdio_transport: json_rpc.Transport.Stdio = .init(&read_buffer, .stdin(), .stdout());
 
-    var thread_safe_transport: zls.lsp.ThreadSafeTransport(.{
+    var thread_safe_transport: json_rpc.ThreadSafeTransport(.{
         .thread_safe_read = false,
         .thread_safe_write = true,
     }) = .init(&stdio_transport.transport);
 
-    const transport: *zls.lsp.Transport = &thread_safe_transport.transport;
+    const transport: *json_rpc.Transport = &thread_safe_transport.transport;
 
     log_transport = if (disable_lsp_logs) null else transport;
     log_stderr = enable_stderr_logs;

@@ -122,6 +122,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .lsp_module = lsp_modules.lsp,
+        .json_rpc_module = lsp_modules.json_rpc,
         .build_options = build_options,
         .version_data = version_data_module,
     });
@@ -146,6 +147,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "fangz", .module = fangz_module },
             .{ .name = "vereda", .module = vereda_module },
             .{ .name = "zig_analyzer", .module = zig_analyzer_module },
+            .{ .name = "json_rpc", .module = lsp_modules.json_rpc },
         },
     });
 
