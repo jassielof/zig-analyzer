@@ -22,11 +22,11 @@ let bundledServerPath: string | undefined;
 
 const docCommentEnterRules: vscode.OnEnterRule[] = [
   {
-    beforeText: /^\s*\/\/\/.*$/,
+    beforeText: /^\s*\/\/\//,
     action: { indentAction: vscode.IndentAction.None, appendText: "/// " },
   },
   {
-    beforeText: /^\s*\/\/\!.*$/,
+    beforeText: /^\s*\/\/!/,
     action: { indentAction: vscode.IndentAction.None, appendText: "//! " },
   },
 ];
@@ -77,9 +77,11 @@ export function activate(context: vscode.ExtensionContext): void {
       "zigAnalyzer.executeRunFile",
       (filePath: string) => executeRunFile(filePath),
     ),
-    vscode.commands.registerCommand(
-      "zigAnalyzer.insertPlainLineAfter",
-      () => insertPlainLineAfter(),
+    vscode.commands.registerCommand("zigAnalyzer.insertPlainLineAfter", () =>
+      insertPlainLineAfter(),
+    ),
+    vscode.commands.registerCommand("zigAnalyzer.handleEnterKey", () =>
+      handleEnterKey(),
     ),
     vscode.commands.registerCommand(
       "zigAnalyzer.showReferences",
@@ -155,12 +157,47 @@ async function insertPlainLineAfter(): Promise<void> {
   const applied = await editor.edit((edit) => {
     edit.insert(line.range.end, `\n${indent}`);
   });
-  if (applied) editor.selection = new vscode.Selection(nextPosition, nextPosition);
+  if (applied)
+    editor.selection = new vscode.Selection(nextPosition, nextPosition);
 }
 
-const serverExecutableName = process.platform === "win32"
-  ? "zig-analyzer.exe"
-  : "zig-analyzer";
+const docCommentContinuePattern = /^(\s*)(\/\/\/|\/\/!)/;
+
+/// Handles the plain Enter key for `.zig` files, manually continuing `///`/`//!` doc comments
+/// instead of relying on `onEnterRules` (`language-configuration.json`). Doc comment content is
+/// tagged `meta.embedded.block.markdown` (see the grammar's `embeddedLanguages` mapping, added so
+/// doc comments render as Markdown) - which makes VS Code resolve the language *at the cursor* as
+/// `markdown` there, same mechanism HTML uses for `<script>`/`<style>` blocks, so it uses
+/// Markdown's Enter behavior instead of the onEnterRules registered for `zig`. This bypasses that
+/// entirely for the one case we care about, falling back to the real default Enter handling (which
+/// still works fine outside a doc comment) for everything else.
+async function handleEnterKey(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (
+    editor &&
+    editor.document.languageId === "zig" &&
+    editor.selections.length === 1 &&
+    editor.selection.isEmpty
+  ) {
+    const position = editor.selection.active;
+    const textBeforeCursor = editor.document.lineAt(position.line).text
+      .slice(0, position.character);
+    const match = docCommentContinuePattern.exec(textBeforeCursor);
+
+    if (match) {
+      const [, indent, marker] = match;
+      const applied = await editor.edit((edit) => {
+        edit.insert(position, `\n${indent}${marker} `);
+      });
+      if (applied) return;
+    }
+  }
+
+  await vscode.commands.executeCommand("default:type", { text: "\n" });
+}
+
+const serverExecutableName =
+  process.platform === "win32" ? "zig-analyzer.exe" : "zig-analyzer";
 
 /// Prefer a configured executable or directory. Expand workspace-folder variables
 /// ourselves: VS Code does not expand variables read through `getConfiguration`.
@@ -171,7 +208,8 @@ function getServerPath(): string {
     .get<string>("serverPath", "")
     .trim();
 
-  if (configured) return executableInDirectory(expandWorkspaceFolder(configured));
+  if (configured)
+    return executableInDirectory(expandWorkspaceFolder(configured));
 
   if (bundledServerPath && fs.existsSync(bundledServerPath)) {
     return bundledServerPath;

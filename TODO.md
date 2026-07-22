@@ -1,5 +1,6 @@
 # Zig Analyzer
 
+- [ ] Outline symbols for `@import()` or `@This()` values are being rendered as `const` while they should be rendered as `module`.
 - [x] Reference counters need to be clickable, just like in JS/TS.
     - Clicking now opens VS Code's built-in Peek References view. The lens command was `""` (a no-op) before; `editor.action.showReferences` needs real `vscode.Uri`/`vscode.Position`/`vscode.Location` values, not the plain LSP-shaped JSON a server can send over the wire, so the lens instead targets a new client-registered command (`zigAnalyzer.showReferences`, in extension.ts) that converts the arguments before calling the built-in — same pattern already used for the build-step lenses' `zigAnalyzer.executeBuild`.
 - [x] Configurable formatter, currently it's hardcoded to always use `zig fmt --stdin`, always, regardless if the editor has a custom formatter configured, and it doesn't respect editor settings, if I want to bring my own `docent fmt --stdin` formatter I simply can't because both the VS Code extension and the LSP hardcode it to the Zig's standard one, plus it can't be disabled. When fixing this, it should respect the editor setting, and explicit ask for a standard input formatter, not via file path.

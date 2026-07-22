@@ -82,7 +82,10 @@
       {
         "language": "zig",
         "scopeName": "source.zig",
-        "path": "./syntaxes/zig.tmLanguage.json"
+        "path": "./syntaxes/zig.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.markdown": "markdown"
+        }
       },
       {
         "language": "zon",
@@ -301,6 +304,10 @@
       {
         "command": "zigAnalyzer.insertPlainLineAfter",
         "title": "Zig Analyzer: Insert Plain Line After"
+      },
+      {
+        "command": "zigAnalyzer.handleEnterKey",
+        "title": "Zig Analyzer: Handle Enter Key"
       }
     ],
     "keybindings": [
@@ -308,6 +315,11 @@
         "command": "zigAnalyzer.insertPlainLineAfter",
         "key": "shift+enter",
         "when": "editorTextFocus && editorLangId == zig"
+      },
+      {
+        "command": "zigAnalyzer.handleEnterKey",
+        "key": "enter",
+        "when": "editorTextFocus && !editorReadonly && editorLangId == zig && !suggestWidgetVisible && !renameInputVisible"
       }
     ],
     "menus": {
@@ -322,6 +334,10 @@
         },
         {
           "command": "zigAnalyzer.insertPlainLineAfter",
+          "when": "false"
+        },
+        {
+          "command": "zigAnalyzer.handleEnterKey",
           "when": "false"
         }
       ]

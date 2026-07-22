@@ -16,9 +16,42 @@
   "repository": {
     "comments": {
       "patterns": [
-        { "name": "comment.line.banner.zig", "match": "//!.*$" },
-        { "name": "comment.line.documentation.zig", "match": "///.*$" },
-        { "name": "comment.line.double-slash.zig", "match": "//.*$" }
+        {
+          "begin": "^(\\s*)(//!)(?:\\s)?",
+          "beginCaptures": {
+            "2": {
+              "name": "punctuation.definition.comment.zig"
+            }
+          },
+          "end": "$",
+          "name": "comment.line.banner.zig",
+          "contentName": "meta.embedded.block.markdown",
+          "patterns": [
+            {
+              "include": "text.html.markdown"
+            }
+          ]
+        },
+        {
+          "begin": "^(\\s*)(///)(?:\\s)?",
+          "beginCaptures": {
+            "2": {
+              "name": "punctuation.definition.comment.zig"
+            }
+          },
+          "end": "$",
+          "name": "comment.line.documentation.zig",
+          "contentName": "meta.embedded.block.markdown",
+          "patterns": [
+            {
+              "include": "text.html.markdown"
+            }
+          ]
+        },
+        {
+          "name": "comment.line.double-slash.zig",
+          "match": "//.*$"
+        }
       ]
     },
     "strings": {
