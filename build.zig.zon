@@ -4,7 +4,7 @@
     .fingerprint = 0xb193caa5fa8a0dc0,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .dmp = .{ .path = "dependencies/dmp" },
+        .dmp = .{ .path = "dependencies/docent/dependencies/dmp" },
         .docent = .{ .path = "dependencies/docent" },
         .fangz = .{ .path = "dependencies/docent/dependencies/fangz" },
         .vereda = .{ .path = "dependencies/docent/dependencies/vereda" },
