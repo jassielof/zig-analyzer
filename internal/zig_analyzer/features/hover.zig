@@ -578,24 +578,7 @@ fn hoverDefinitionImportString(
     const loc = pos_context.loc(&handle.tree) orelse return null;
     const import_str = offsets.locToSlice(handle.tree.source, pos_context.stringLiteralContentLoc(handle.tree.source));
 
-    // Resolving e.g. "root" or a named module import needs the build runner's config, which on a
-    // document's first open can still be resolving in the background - wait a bounded amount for
-    // it rather than immediately reporting "no docs available" (see the identical concern for
-    // completions in features/completions.zig, `waitForBuildConfig`/`waitForAssociatedBuildFile`).
-    var resolved_type: Analyser.Type = undefined;
-    {
-        const io = analyser.store.io;
-        var waited_ms: i64 = 0;
-        while (true) {
-            if (try analyser.resolveImportString(handle, import_str)) |ty| {
-                resolved_type = ty;
-                break;
-            }
-            if (waited_ms >= 2000) return null;
-            try std.Io.sleep(io, .fromMilliseconds(100), .awake);
-            waited_ms += 100;
-        }
-    }
+    var resolved_type = try analyser.resolveImportString(handle, import_str) orelse return null;
     if (std.mem.endsWith(u8, import_str, ".zon")) {
         // `@import` of a `.zig` file is a type; `@import` of a `.zon` file is a value (see the
         // `.import` case in `resolveTypeOfNodeUncached`) — unwrap the same way here.
