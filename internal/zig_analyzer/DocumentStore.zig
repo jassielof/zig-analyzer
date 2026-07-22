@@ -177,7 +177,6 @@ pub const Handle = struct {
         has_tree_and_source: bool,
 
         associated_build_file: AssociatedBuildFile.State = .init,
-        associated_compilation_units: GetAssociatedCompilationUnitsResult = .unresolved,
     },
 
     pub fn getDocumentScope(self: *Handle) error{OutOfMemory}!*const DocumentScope {
@@ -308,95 +307,6 @@ pub const Handle = struct {
         self.impl.associated_build_file.deinit(document_store.allocator);
         self.impl.associated_build_file = .none;
         return .none;
-    }
-
-    pub const GetAssociatedCompilationUnitsResult = union(enum) {
-        /// The Handle has no associated compilation unit.
-        none,
-        /// The associated compilation unit has not been resolved yet.
-        unresolved,
-        /// The associated compilation unit has been successfully resolved to a list of root module.
-        resolved: []const []const u8,
-
-        fn deinit(result: *GetAssociatedCompilationUnitsResult, allocator: std.mem.Allocator) void {
-            switch (result.*) {
-                .none, .unresolved => {},
-                .resolved => |root_source_files| {
-                    allocator.free(root_source_files);
-                },
-            }
-            result.* = undefined;
-        }
-    };
-
-    /// Returns the root source file of the root module of the given handle. Same as `@import("root")`.
-    pub fn getAssociatedCompilationUnits(self: *Handle, document_store: *DocumentStore) error{ Canceled, OutOfMemory }!GetAssociatedCompilationUnitsResult {
-        const allocator = document_store.allocator;
-        const io = document_store.io;
-
-        const build_file, const target_root_source_file = switch (self.impl.associated_compilation_units) {
-            else => return self.impl.associated_compilation_units,
-            .unresolved => switch (try self.getAssociatedBuildFile(document_store)) {
-                .none => return .none,
-                .unresolved => return .unresolved,
-                .resolved => |resolved| .{ resolved.build_file, resolved.root_source_file },
-            },
-        };
-
-        const build_config = build_file.tryLockConfig(io) orelse return .none;
-        defer build_file.unlockConfig(io);
-
-        const modules = &build_config.modules.map;
-
-        var visted: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, modules.count());
-        defer visted.deinit(allocator);
-
-        var queue: std.ArrayList(usize) = try .initCapacity(allocator, 1);
-        defer queue.deinit(allocator);
-
-        const target_index = modules.getIndex(target_root_source_file).?;
-
-        // We only care about the root source file of each root module so we convert them to a set.
-        var root_modules: std.array_hash_map.String(void) = .empty;
-        defer root_modules.deinit(allocator);
-
-        try root_modules.ensureTotalCapacity(allocator, build_config.compilations.len);
-        for (build_config.compilations) |compile| {
-            root_modules.putAssumeCapacity(compile.root_module, {});
-        }
-
-        var results: std.ArrayList([]const u8) = .empty;
-        defer results.deinit(allocator);
-
-        // Do a graph search from root modules until we reach `root_source_file`
-        for (root_modules.keys()) |root_module| {
-            visted.unsetAll();
-            queue.clearRetainingCapacity();
-            queue.appendAssumeCapacity(modules.getIndex(root_module).?);
-
-            while (queue.pop()) |index| {
-                if (index == target_index) {
-                    try results.append(allocator, root_module);
-                    break;
-                }
-
-                if (visted.isSet(index)) continue;
-                visted.set(index);
-
-                const imported_modules = modules.values()[index].import_table.map.values();
-                try queue.ensureUnusedCapacity(allocator, imported_modules.len);
-                for (imported_modules) |root_source_file| {
-                    queue.appendAssumeCapacity(modules.getIndex(root_source_file) orelse continue);
-                }
-            }
-        }
-
-        if (results.items.len == 0) {
-            self.impl.associated_compilation_units = .none;
-        } else {
-            self.impl.associated_compilation_units = .{ .resolved = try results.toOwnedSlice(allocator) };
-        }
-        return self.impl.associated_compilation_units;
     }
 
     fn refresh(
@@ -560,7 +470,6 @@ pub const Handle = struct {
         self.cimports.deinit(allocator);
 
         self.impl.associated_build_file.deinit(allocator);
-        self.impl.associated_compilation_units.deinit(allocator);
 
         self.* = undefined;
     }
@@ -1940,19 +1849,15 @@ pub fn uriFromImportStr(
     if (!supports_build_system) return .none;
 
     if (std.mem.eql(u8, import_str, "root")) {
-        const root_source_files = switch (try handle.getAssociatedCompilationUnits(self)) {
+        // "root" always means the root source file of the module `handle` structurally belongs
+        // to (i.e. `handle`'s own module, found via `getAssociatedBuildFile`'s same-module
+        // relative-@import search) - never "any Compile step whose graph happens to reach this
+        // module via some other module's named import", which is a different, broader question
+        // that doesn't correspond to what `@import("root")` actually means in Zig.
+        switch (try handle.getAssociatedBuildFile(self)) {
             .none, .unresolved => return .none,
-            .resolved => |root_source_files| root_source_files,
-        };
-        var uris: std.ArrayList(Uri) = try .initCapacity(allocator, root_source_files.len);
-        defer {
-            for (uris.items) |uri| uri.deinit(allocator);
-            uris.deinit(allocator);
+            .resolved => |resolved| return .{ .one = try .fromPath(allocator, resolved.root_source_file) },
         }
-        for (root_source_files) |root_source_file| {
-            uris.appendAssumeCapacity(try .fromPath(allocator, root_source_file));
-        }
-        return .{ .many = try uris.toOwnedSlice(allocator) };
     }
 
     if (isBuildFile(handle.uri)) blk: {
