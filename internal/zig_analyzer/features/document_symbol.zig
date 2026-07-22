@@ -17,6 +17,72 @@ const Symbol = struct {
     children: std.ArrayList(Symbol),
 };
 
+/// Returns the string literal argument of `@import("...")`, or null if `node` isn't a
+/// single-argument `@import` call. Only the direct whole-file case; `@import(...).Member` isn't
+/// handled here since knowing what `Member` actually is needs real type resolution, not a shallow
+/// AST check.
+fn importedFilePath(tree: *const Ast, node: Ast.Node.Index) ?[]const u8 {
+    if (!ast.isBuiltinCall(tree, node)) return null;
+    if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@import")) return null;
+
+    var buffer: [2]Ast.Node.Index = undefined;
+    const params = tree.builtinCallParams(&buffer, node) orelse return null;
+    if (params.len != 1) return null;
+    if (tree.nodeTag(params[0]) != .string_literal) return null;
+
+    const raw = tree.tokenSlice(tree.nodeMainToken(params[0]));
+    if (raw.len < 2) return null;
+    return raw[1 .. raw.len - 1];
+}
+
+/// True when `node` is the builtin call `@This()` (no arguments) - it names whatever container
+/// encloses it, not a declaration or file elsewhere.
+fn isThisCall(tree: *const Ast, node: Ast.Node.Index) bool {
+    if (!ast.isBuiltinCall(tree, node)) return false;
+    if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@This")) return false;
+
+    var buffer: [2]Ast.Node.Index = undefined;
+    const params = tree.builtinCallParams(&buffer, node) orelse return false;
+    return params.len == 0;
+}
+
+/// True when `container` (a `container_decl`-ish node, or `.root` for the file scope) declares at
+/// least one field, as opposed to only declarations - the same "field-less container is a
+/// namespace" convention used elsewhere (e.g. docent's `identifier_case` naming-convention rule).
+fn containerHasFields(tree: *const Ast, container: Ast.Node.Index) bool {
+    if (tree.nodeTag(container) == .root) {
+        for (tree.rootDecls()) |decl| {
+            if (tree.fullContainerField(decl) != null) return true;
+        }
+        return false;
+    }
+
+    var buffer: [2]Ast.Node.Index = undefined;
+    const decl = tree.fullContainerDecl(&buffer, container) orelse return false;
+    for (decl.ast.members) |member| {
+        if (tree.fullContainerField(member) != null) return true;
+    }
+    return false;
+}
+
+/// Symbol kind for a container declaration's own keyword (`struct`, `union`, `enum`, `opaque`).
+/// Field-less struct/opaque containers are namespaces, matching `containerHasFields`.
+fn containerDeclSymbolKind(tree: *const Ast, container: Ast.full.ContainerDecl) types.SymbolKind {
+    return switch (tree.tokenTag(container.ast.main_token)) {
+        .keyword_enum => .Enum,
+        .keyword_union => .Struct, // LSP has no dedicated "union" kind.
+        .keyword_struct, .keyword_opaque => if (containerHasFieldsFull(tree, container)) .Struct else .Namespace,
+        else => .Struct,
+    };
+}
+
+fn containerHasFieldsFull(tree: *const Ast, container: Ast.full.ContainerDecl) bool {
+    for (container.ast.members) |member| {
+        if (tree.fullContainerField(member) != null) return true;
+    }
+    return false;
+}
+
 pub fn tokenNameMaybeQuotes(tree: *const Ast, token: Ast.TokenIndex) []const u8 {
     const token_slice = tree.tokenSlice(token);
     switch (tree.tokenTag(token)) {
@@ -84,10 +150,23 @@ pub fn getDocumentSymbols(
 
                 stack_entry.last_var_decl_name_token = .fromToken(var_decl_name_token);
 
-                const kind: types.SymbolKind = switch (tree.tokenTag(tree.nodeMainToken(node))) {
-                    .keyword_var => .Variable,
-                    .keyword_const => .Constant,
-                    else => unreachable,
+                const kind: types.SymbolKind = kind: {
+                    // `var` is never a container/module alias worth reclassifying.
+                    if (tree.tokenTag(tree.nodeMainToken(node)) != .keyword_const) break :kind .Variable;
+
+                    const init_node = var_decl.ast.init_node.unwrap() orelse break :kind .Constant;
+
+                    var buffer: [2]Ast.Node.Index = undefined;
+                    if (tree.fullContainerDecl(&buffer, init_node)) |container_decl| {
+                        break :kind containerDeclSymbolKind(tree, container_decl);
+                    }
+                    if (tree.nodeTag(init_node) == .error_set_decl) break :kind .Enum;
+                    if (importedFilePath(tree, init_node) != null) break :kind .Module;
+                    if (isThisCall(tree, init_node)) {
+                        break :kind if (containerHasFields(tree, stack_entry.parent_container)) .Struct else .Namespace;
+                    }
+
+                    break :kind .Constant;
                 };
 
                 break :blk .{
