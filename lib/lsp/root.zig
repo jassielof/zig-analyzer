@@ -1,3 +1,4 @@
+//! Hola bola, this is the LSP SDK for Zig.
 const std = @import("std");
 
 pub const types = @import("types");
@@ -5,10 +6,8 @@ pub const parser = @import("parser");
 pub const offsets = @import("offsets.zig");
 pub const basic_server = @import("basic_server.zig");
 
-/// Generic JSON-RPC 2.0 message types, Base Protocol (`Content-Length`) framing, and the
-/// `Transport` abstraction. See `lib/json_rpc/root.zig` for the implementation; everything in
-/// this file is the LSP-specific layer (typed request/notification dispatch, `types`, and
-/// `window/logMessage` helpers) built on top of it.
+// TODO: This json_rpc shouldn't be re-exported, it's an importable module, so any module that needs it shouldn't need to import the lsp module just to get json_rpc. If it needs to be refactored for any lsp.json_rpc, refactor it. As well this doc comment on the json_rpc is redundant, as the module itself already has its own doc comment.
+/// Generic JSON-RPC 2.0 message types, Base Protocol (`Content-Length`) framing, and the `Transport` abstraction. See `lib/json_rpc/root.zig` for the implementation; everything in this file is the LSP-specific layer (typed request/notification dispatch, `types`, and `window/logMessage` helpers) built on top of it.
 pub const json_rpc = @import("json_rpc");
 
 pub const JsonRPCMessage = json_rpc.JsonRPCMessage;

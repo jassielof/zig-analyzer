@@ -46,6 +46,7 @@ pub fn createLspModules(
         .optimize = options.optimize,
     });
 
+    // TODO: The parser shouldn't be a module itself, it shouldn't be imported, it should be part of the respective module it belongs, either JSON-RPC or the LSP library. 
     const lsp_parser_module = b.createModule(.{
         .root_source_file = b.path("lib/lsp/parser.zig"),
         .target = options.target,

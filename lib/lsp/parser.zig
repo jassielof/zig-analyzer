@@ -1,7 +1,6 @@
 //! Custom `std.json` parser functions.
 
 const std = @import("std");
-
 pub fn Map(comptime Key: type, comptime Value: type) type {
     if (Key != []const u8) @compileError("TODO support non string Key's");
     return std.json.ArrayHashMap(Value);
