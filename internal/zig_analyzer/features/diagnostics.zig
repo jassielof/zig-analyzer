@@ -15,7 +15,7 @@ const Uri = @import("../Uri.zig");
 const code_actions = @import("code_actions.zig");
 const DiagnosticsCollection = @import("../DiagnosticsCollection.zig");
 const references = @import("references.zig");
-const docent = @import("docent");
+const rules = @import("rules");
 
 const Zir = std.zig.Zir;
 
@@ -214,7 +214,7 @@ fn collectUnusedDeclDiagnostics(
     }
 }
 
-/// Reuses docent's `identifier_case` rule (`dependencies/docent/internal/docent/rules/style/identifier_case.zig`)
+/// Reuses docent's `identifier_case` rule (`dependencies/docent/lib/rules/style/identifier_case.zig`)
 /// to flag identifiers that don't follow the Zig naming conventions (camelCase functions, PascalCase
 /// types, snake_case constants/fields/namespaces).
 fn collectNamingConventionDiagnostics(
@@ -228,18 +228,18 @@ fn collectNamingConventionDiagnostics(
     // `@import("...")` targets (namespace vs. struct file) and to check the file's own name.
     const file_path = handle.uri.toFsPath(arena) catch return;
 
-    var docent_diagnostics: std.ArrayList(docent.Diagnostic) = .empty;
-    try docent.rules.style.identifier_case.check(
+    var rule_diagnostics: std.ArrayList(rules.Diagnostic) = .empty;
+    try rules.style.identifier_case.check(
         &handle.tree,
         .{},
         file_path,
         arena,
         io,
         arena,
-        &docent_diagnostics,
+        &rule_diagnostics,
     );
 
-    for (docent_diagnostics.items) |d| {
+    for (rule_diagnostics.items) |d| {
         const start_index = offsets.positionToIndex(handle.tree.source, .{
             .line = @intCast(d.line - 1),
             .character = @intCast(d.column - 1),
