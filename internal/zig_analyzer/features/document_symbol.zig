@@ -14,6 +14,9 @@ const max_alias_depth = 3;
 
 const Symbol = struct {
     name_token: Ast.TokenIndex,
+    /// Overrides the name derived from `name_token` (`tokenNameMaybeQuotes`) - used for ZON array
+    /// elements, which have no name token of their own (just a positional index).
+    name_override: ?[]const u8 = null,
     detail: ?[]const u8 = null,
     kind: types.SymbolKind,
     loc: offsets.Loc,
@@ -196,6 +199,133 @@ pub fn tokenNameMaybeQuotes(tree: *const Ast, token: Ast.TokenIndex) []const u8 
     }
 }
 
+/// A `.zon` file's entire content is a single expression - a primitive literal, or an anonymous
+/// struct/tuple literal (`.{ ... }`) whose fields/elements can themselves nest more of the same.
+/// There's no top-level declaration list to walk like a `.zig` file has, and no `@import`/`@This`/
+/// aliasing to resolve (ZON is pure data, similar to JSON) - just this literal's own shape.
+///
+/// Classification mirrors how editors already outline JSON: a value's own `SymbolKind` describes
+/// what *kind of value* it is, not what it's stored as -
+///   - struct-init (`.{ .a = 1, .b = 2 }`, named fields) -> `.Object`, one child per field
+///   - array-init (`.{ 1, 2, 3 }`, positional elements, ZON's "anonymous tuple literal") ->
+///     `.Array`, one child per element, named by its index (there's no source text to name it)
+///   - `.number_literal` -> `.Number`; `.string_literal`/`.multiline_string_literal`/`.char_literal`
+///     -> `.String`; `.enum_literal` (`.foo`) -> `.EnumMember`
+///   - the bare identifiers `true`/`false` -> `.Boolean`; `null` -> `.Null`; `inf`/`nan` -> `.Number`
+///     (ZON's boolean/null/nan/inf literals all parse as plain `.identifier` nodes - there's no
+///     dedicated node tag for them, so recognizing them means comparing the token text directly,
+///     same as `std.zig.ZonGen` does when lowering these same nodes for real evaluation)
+///   - anything else -> `.Constant` (shouldn't be reachable for valid ZON, but harmless fallback)
+fn classifyZonValue(
+    arena: std.mem.Allocator,
+    tree: *const Ast,
+    node: Ast.Node.Index,
+) error{OutOfMemory}!struct {
+    kind: types.SymbolKind,
+    detail: ?[]const u8,
+    children: std.ArrayList(Symbol),
+} {
+    var buffer: [2]Ast.Node.Index = undefined;
+
+    if (tree.fullStructInit(&buffer, node)) |struct_init| {
+        var children: std.ArrayList(Symbol) = .empty;
+        try collectZonStructFields(arena, tree, struct_init, &children);
+        return .{ .kind = .Object, .detail = null, .children = children };
+    }
+    if (tree.fullArrayInit(&buffer, node)) |array_init| {
+        var children: std.ArrayList(Symbol) = .empty;
+        try collectZonArrayElements(arena, tree, array_init, &children);
+        return .{ .kind = .Array, .detail = null, .children = children };
+    }
+
+    // The full source span, not just the first token: an enum literal's first token is the
+    // punctuation `.`, not the identifier after it (`nodeMainToken` is), and this stays correct
+    // regardless of how many tokens a value spans (e.g. a negated number literal).
+    const detail = offsets.locToSlice(tree.source, offsets.nodeToLoc(tree, node));
+    const identifier_text = tree.tokenSlice(tree.nodeMainToken(node));
+    const kind: types.SymbolKind = switch (tree.nodeTag(node)) {
+        .number_literal => .Number,
+        .string_literal, .multiline_string_literal, .char_literal => .String,
+        .enum_literal => .EnumMember,
+        .identifier => blk: {
+            if (std.mem.eql(u8, identifier_text, "true") or std.mem.eql(u8, identifier_text, "false")) break :blk .Boolean;
+            if (std.mem.eql(u8, identifier_text, "null")) break :blk .Null;
+            if (std.mem.eql(u8, identifier_text, "inf") or std.mem.eql(u8, identifier_text, "nan")) break :blk .Number;
+            break :blk .Constant;
+        },
+        else => .Constant,
+    };
+    return .{ .kind = kind, .detail = detail, .children = .empty };
+}
+
+/// Appends a `Symbol` for every named field of a ZON struct-init - reusing the exact same
+/// "there's no dedicated field node, walk back two tokens from the value" trick as
+/// `DocumentScope.zig`'s `walkZonStructInitFields`, since ZON struct-init fields have no AST node
+/// of their own to name them by.
+fn collectZonStructFields(
+    arena: std.mem.Allocator,
+    tree: *const Ast,
+    struct_init: Ast.full.StructInit,
+    out: *std.ArrayList(Symbol),
+) error{OutOfMemory}!void {
+    for (struct_init.ast.fields) |value_node| {
+        const name_token = tree.firstToken(value_node) - 2;
+        if (tree.tokenTag(name_token) != .identifier) continue;
+
+        const classified = try classifyZonValue(arena, tree, value_node);
+        try out.append(arena, .{
+            .name_token = name_token,
+            .detail = classified.detail,
+            .kind = classified.kind,
+            .loc = offsets.nodeToLoc(tree, value_node),
+            .selection_loc = offsets.tokenToLoc(tree, name_token),
+            .children = classified.children,
+        });
+    }
+}
+
+/// Appends a `Symbol` for every element of a ZON array-init, named by its positional index since
+/// array elements have no name of their own.
+fn collectZonArrayElements(
+    arena: std.mem.Allocator,
+    tree: *const Ast,
+    array_init: Ast.full.ArrayInit,
+    out: *std.ArrayList(Symbol),
+) error{OutOfMemory}!void {
+    for (array_init.ast.elements, 0..) |element_node, index| {
+        const classified = try classifyZonValue(arena, tree, element_node);
+        try out.append(arena, .{
+            .name_token = tree.firstToken(element_node),
+            .name_override = try std.fmt.allocPrint(arena, "{d}", .{index}),
+            .detail = classified.detail,
+            .kind = classified.kind,
+            .loc = offsets.nodeToLoc(tree, element_node),
+            .selection_loc = offsets.nodeToLoc(tree, element_node),
+            .children = classified.children,
+        });
+    }
+}
+
+fn getZonDocumentSymbols(
+    arena: std.mem.Allocator,
+    tree: *const Ast,
+    encoding: offsets.Encoding,
+) error{OutOfMemory}![]types.DocumentSymbol {
+    // A bare scalar root (e.g. a lone string literal, which is valid ZON) classifies as a leaf
+    // with no children - nothing to outline, so this naturally returns an empty symbol list.
+    const classified = try classifyZonValue(arena, tree, tree.nodeData(.root).node);
+
+    var total_symbol_count: usize = 0;
+    countSymbolsRecursive(classified.children.items, &total_symbol_count);
+
+    return try convertSymbols(arena, tree, classified.children.items, total_symbol_count, encoding);
+}
+
+fn countSymbolsRecursive(symbols: []const Symbol, total: *usize) void {
+    total.* += symbols.len;
+    for (symbols) |symbol| countSymbolsRecursive(symbol.children.items, total);
+}
+
 pub fn getDocumentSymbols(
     arena: std.mem.Allocator,
     document_store: *DocumentStore,
@@ -203,6 +333,7 @@ pub fn getDocumentSymbols(
     encoding: offsets.Encoding,
 ) error{ Canceled, OutOfMemory }![]types.DocumentSymbol {
     const tree = &handle.tree;
+    if (tree.mode == .zon) return try getZonDocumentSymbols(arena, tree, encoding);
 
     var symbols: std.ArrayList(Symbol) = .empty;
     var total_symbol_count: usize = 0;
@@ -433,7 +564,7 @@ fn convertSymbols(
             try queue.append(arena, .{ symbol.children.items, document_symbol_children });
 
             document_symbol.* = .{
-                .name = tokenNameMaybeQuotes(tree, symbol.name_token),
+                .name = symbol.name_override orelse tokenNameMaybeQuotes(tree, symbol.name_token),
                 .detail = symbol.detail,
                 .kind = symbol.kind,
                 // will be set later through the mapping below
