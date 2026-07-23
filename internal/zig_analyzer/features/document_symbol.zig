@@ -1,4 +1,4 @@
-//! Implementation of [`textDocument/documentSymbol`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_documentSymbol)
+//! The document_symbol namespace implementats [`textDocument/documentSymbol`](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_documentSymbol).
 
 const std = @import("std");
 const Ast = std.zig.Ast;
@@ -7,6 +7,11 @@ const types = @import("lsp").types;
 const offsets = @import("../offsets.zig");
 const ast = @import("../ast.zig");
 const analysis = @import("../analysis.zig");
+const DocumentStore = @import("../DocumentStore.zig");
+
+/// Caps how many alias hops (`const foo = bar.baz;` where `bar` is itself a resolved import) get
+/// chased when classifying a declaration. Bounds cost and rules out cycles.
+const max_alias_depth = 3;
 
 const Symbol = struct {
     name_token: Ast.TokenIndex,
@@ -83,6 +88,111 @@ fn containerHasFieldsFull(tree: *const Ast, container: Ast.full.ContainerDecl) b
     return false;
 }
 
+/// Resolves a relative `.zig` `@import(...)` string to its target handle. Returns null for
+/// anything that isn't a same-module file import (a named module/dependency like `@import("std")`,
+/// or a `.zon` data file) or that can't be resolved.
+fn resolveRelativeImportHandle(
+    document_store: *DocumentStore,
+    arena: std.mem.Allocator,
+    handle: *DocumentStore.Handle,
+    import_str: []const u8,
+) error{ Canceled, OutOfMemory }!?*DocumentStore.Handle {
+    if (!std.mem.endsWith(u8, import_str, ".zig")) return null;
+    const result = try document_store.uriFromImportStr(arena, handle, import_str);
+    const uri = switch (result) {
+        .one => |uri| uri,
+        .none, .many => return null,
+    };
+    return try document_store.getOrLoadHandle(uri);
+}
+
+/// Finds a top-level `const`/`var`/`fn` declaration named `name`, returning its declaration node
+/// (the `fn_decl` node, or the `var_decl` node).
+fn findTopLevelDecl(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
+    for (tree.rootDecls()) |decl| {
+        switch (tree.nodeTag(decl)) {
+            .fn_decl => {
+                var buffer: [1]Ast.Node.Index = undefined;
+                const proto = tree.fullFnProto(&buffer, decl) orelse continue;
+                const name_token = proto.name_token orelse continue;
+                if (std.mem.eql(u8, tree.tokenSlice(name_token), name)) return decl;
+            },
+            .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
+                const var_decl = tree.fullVarDecl(decl) orelse continue;
+                if (std.mem.eql(u8, tree.tokenSlice(var_decl.ast.mut_token + 1), name)) return decl;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Classifies a resolved top-level declaration node (`fn_decl` or `var_decl`) - the target found
+/// at the end of an alias chain.
+fn classifyTopLevelDecl(
+    document_store: *DocumentStore,
+    arena: std.mem.Allocator,
+    handle: *DocumentStore.Handle,
+    decl_node: Ast.Node.Index,
+    depth: u8,
+) error{ Canceled, OutOfMemory }!types.SymbolKind {
+    const tree = &handle.tree;
+    if (tree.nodeTag(decl_node) == .fn_decl) return .Function;
+
+    const var_decl = tree.fullVarDecl(decl_node) orelse return .Constant;
+    if (tree.tokenTag(tree.nodeMainToken(decl_node)) != .keyword_const) return .Variable;
+    const init_node = var_decl.ast.init_node.unwrap() orelse return .Constant;
+
+    return try classifyConstInit(document_store, arena, handle, init_node, .root, depth);
+}
+
+/// Classifies what a `const` declaration's initializer actually declares: a container literal, an
+/// error set, a same-module file import, `@This()`, or (up to `depth` hops) a plain alias into one
+/// of those (`const foo = bar.baz;` where `bar` is itself a resolved import). Falls back to
+/// `.Constant` for anything it can't resolve cheaply - deeper/dynamic aliases need real type
+/// inference, which belongs in hover/goto-definition, not a whole-file outline request.
+fn classifyConstInit(
+    document_store: *DocumentStore,
+    arena: std.mem.Allocator,
+    handle: *DocumentStore.Handle,
+    init_node: Ast.Node.Index,
+    parent_container: Ast.Node.Index,
+    depth: u8,
+) error{ Canceled, OutOfMemory }!types.SymbolKind {
+    const tree = &handle.tree;
+
+    var buffer: [2]Ast.Node.Index = undefined;
+    if (tree.fullContainerDecl(&buffer, init_node)) |container_decl| {
+        return containerDeclSymbolKind(tree, container_decl);
+    }
+    if (tree.nodeTag(init_node) == .error_set_decl) return .Enum;
+
+    if (importedFilePath(tree, init_node)) |import_str| {
+        const target = try resolveRelativeImportHandle(document_store, arena, handle, import_str) orelse
+            return .Module; // named module/dependency (e.g. `std`), or a `.zon` data file.
+        return if (containerHasFields(&target.tree, .root)) .Struct else .Namespace;
+    }
+
+    if (isThisCall(tree, init_node)) {
+        return if (containerHasFields(tree, parent_container)) .Struct else .Namespace;
+    }
+
+    if (depth > 0 and tree.nodeTag(init_node) == .field_access) {
+        const lhs, const field_token = tree.nodeData(init_node).node_and_token;
+        const base_token = ast.identifierTokenFromIdentifierNode(tree, lhs) orelse return .Constant;
+        const base_decl = findTopLevelDecl(tree, tree.tokenSlice(base_token)) orelse return .Constant;
+        const base_var_decl = tree.fullVarDecl(base_decl) orelse return .Constant;
+        const base_init = base_var_decl.ast.init_node.unwrap() orelse return .Constant;
+        const import_str = importedFilePath(tree, base_init) orelse return .Constant;
+        const target = try resolveRelativeImportHandle(document_store, arena, handle, import_str) orelse return .Constant;
+
+        const member_decl = findTopLevelDecl(&target.tree, tree.tokenSlice(field_token)) orelse return .Constant;
+        return try classifyTopLevelDecl(document_store, arena, target, member_decl, depth - 1);
+    }
+
+    return .Constant;
+}
+
 pub fn tokenNameMaybeQuotes(tree: *const Ast, token: Ast.TokenIndex) []const u8 {
     const token_slice = tree.tokenSlice(token);
     switch (tree.tokenTag(token)) {
@@ -105,9 +215,12 @@ pub fn tokenNameMaybeQuotes(tree: *const Ast, token: Ast.TokenIndex) []const u8 
 
 pub fn getDocumentSymbols(
     arena: std.mem.Allocator,
-    tree: *const Ast,
+    document_store: *DocumentStore,
+    handle: *DocumentStore.Handle,
     encoding: offsets.Encoding,
-) error{OutOfMemory}![]types.DocumentSymbol {
+) error{ Canceled, OutOfMemory }![]types.DocumentSymbol {
+    const tree = &handle.tree;
+
     var symbols: std.ArrayList(Symbol) = .empty;
     var total_symbol_count: usize = 0;
 
@@ -156,17 +269,14 @@ pub fn getDocumentSymbols(
 
                     const init_node = var_decl.ast.init_node.unwrap() orelse break :kind .Constant;
 
-                    var buffer: [2]Ast.Node.Index = undefined;
-                    if (tree.fullContainerDecl(&buffer, init_node)) |container_decl| {
-                        break :kind containerDeclSymbolKind(tree, container_decl);
-                    }
-                    if (tree.nodeTag(init_node) == .error_set_decl) break :kind .Enum;
-                    if (importedFilePath(tree, init_node) != null) break :kind .Module;
-                    if (isThisCall(tree, init_node)) {
-                        break :kind if (containerHasFields(tree, stack_entry.parent_container)) .Struct else .Namespace;
-                    }
-
-                    break :kind .Constant;
+                    break :kind try classifyConstInit(
+                        document_store,
+                        arena,
+                        handle,
+                        init_node,
+                        stack_entry.parent_container,
+                        max_alias_depth,
+                    );
                 };
 
                 break :blk .{

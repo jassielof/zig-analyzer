@@ -1316,7 +1316,7 @@ fn documentSymbolsHandler(server: *Server, arena: std.mem.Allocator, request: ty
     const handle = server.document_store.getHandle(document_uri) orelse return null;
     if (handle.tree.mode == .zon) return null;
     return .{
-        .document_symbols = try document_symbol.getDocumentSymbols(arena, &handle.tree, server.offset_encoding),
+        .document_symbols = try document_symbol.getDocumentSymbols(arena, &server.document_store, handle, server.offset_encoding),
     };
 }
 
