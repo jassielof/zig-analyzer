@@ -273,12 +273,15 @@ fn collectZonStructFields(
         if (tree.tokenTag(name_token) != .identifier) continue;
 
         const classified = try classifyZonValue(arena, tree, value_node);
+        const selection_loc = offsets.tokenToLoc(tree, name_token);
         try out.append(arena, .{
             .name_token = name_token,
             .detail = classified.detail,
             .kind = classified.kind,
-            .loc = offsets.nodeToLoc(tree, value_node),
-            .selection_loc = offsets.tokenToLoc(tree, name_token),
+            // The field name (`selection_loc`) comes before the value in source, so the full
+            // range has to span both - a range covering only the value wouldn't contain it.
+            .loc = offsets.locMerge(selection_loc, offsets.nodeToLoc(tree, value_node)),
+            .selection_loc = selection_loc,
             .children = classified.children,
         });
     }
