@@ -113,10 +113,13 @@ async function start(): Promise<void> {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "zig" }],
+    documentSelector: [
+      { scheme: "file", language: "zig" },
+      { scheme: "file", language: "zon" },
+    ],
     synchronize: {
       configurationSection: "zigAnalyzer",
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.zig"),
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.{zig,zon}"),
     },
     initializationOptions: getZigAnalyzerSettings(),
   };
