@@ -23,7 +23,7 @@
               "name": "punctuation.definition.comment.zig"
             }
           },
-          "end": "$",
+          "while": "^(\\s*)(//!)(?:\\s)?",
           "name": "comment.line.banner.zig",
           "contentName": "meta.embedded.block.markdown",
           "patterns": [
@@ -39,7 +39,7 @@
               "name": "punctuation.definition.comment.zig"
             }
           },
-          "end": "$",
+          "while": "^(\\s*)(///)(?:\\s)?",
           "name": "comment.line.documentation.zig",
           "contentName": "meta.embedded.block.markdown",
           "patterns": [
