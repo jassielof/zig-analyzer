@@ -9,8 +9,7 @@ const ast = @import("../ast.zig");
 const analysis = @import("../analysis.zig");
 const DocumentStore = @import("../DocumentStore.zig");
 
-/// Caps how many alias hops (`const foo = bar.baz;` where `bar` is itself a resolved import) get
-/// chased when classifying a declaration. Bounds cost and rules out cycles.
+/// Caps how many alias hops (`const foo = bar.baz;` where `bar` is itself a resolved import) get chased when classifying a declaration. Bounds cost and rules out cycles.
 const max_alias_depth = 3;
 
 const Symbol = struct {
@@ -22,10 +21,7 @@ const Symbol = struct {
     children: std.ArrayList(Symbol),
 };
 
-/// Returns the string literal argument of `@import("...")`, or null if `node` isn't a
-/// single-argument `@import` call. Only the direct whole-file case; `@import(...).Member` isn't
-/// handled here since knowing what `Member` actually is needs real type resolution, not a shallow
-/// AST check.
+/// Returns the string literal argument of `@import("...")`, or null if `node` isn't a single-argument `@import` call. Only the direct whole-file case; `@import(...).Member` isn't handled here since knowing what `Member` actually is needs real type resolution, not a shallow AST check.
 fn importedFilePath(tree: *const Ast, node: Ast.Node.Index) ?[]const u8 {
     if (!ast.isBuiltinCall(tree, node)) return null;
     if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@import")) return null;
@@ -40,8 +36,7 @@ fn importedFilePath(tree: *const Ast, node: Ast.Node.Index) ?[]const u8 {
     return raw[1 .. raw.len - 1];
 }
 
-/// True when `node` is the builtin call `@This()` (no arguments) - it names whatever container
-/// encloses it, not a declaration or file elsewhere.
+/// True when `node` is the builtin call `@This()` (no arguments) - it names whatever container encloses it, not a declaration or file elsewhere.
 fn isThisCall(tree: *const Ast, node: Ast.Node.Index) bool {
     if (!ast.isBuiltinCall(tree, node)) return false;
     if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@This")) return false;
@@ -51,9 +46,7 @@ fn isThisCall(tree: *const Ast, node: Ast.Node.Index) bool {
     return params.len == 0;
 }
 
-/// True when `container` (a `container_decl`-ish node, or `.root` for the file scope) declares at
-/// least one field, as opposed to only declarations - the same "field-less container is a
-/// namespace" convention used elsewhere (e.g. docent's `identifier_case` naming-convention rule).
+/// True when `container` (a `container_decl`-ish node, or `.root` for the file scope) declares at least one field, as opposed to only declarations - the same "field-less container is a namespace" convention used elsewhere (e.g. docent's `identifier_case` naming-convention rule).
 fn containerHasFields(tree: *const Ast, container: Ast.Node.Index) bool {
     if (tree.nodeTag(container) == .root) {
         for (tree.rootDecls()) |decl| {
@@ -88,9 +81,7 @@ fn containerHasFieldsFull(tree: *const Ast, container: Ast.full.ContainerDecl) b
     return false;
 }
 
-/// Resolves a relative `.zig` `@import(...)` string to its target handle. Returns null for
-/// anything that isn't a same-module file import (a named module/dependency like `@import("std")`,
-/// or a `.zon` data file) or that can't be resolved.
+/// Resolves a relative `.zig` `@import(...)` string to its target handle. Returns null for anything that isn't a same-module file import (a named module/dependency like `@import("std")`, or a `.zon` data file) or that can't be resolved.
 fn resolveRelativeImportHandle(
     document_store: *DocumentStore,
     arena: std.mem.Allocator,
@@ -106,8 +97,7 @@ fn resolveRelativeImportHandle(
     return try document_store.getOrLoadHandle(uri);
 }
 
-/// Finds a top-level `const`/`var`/`fn` declaration named `name`, returning its declaration node
-/// (the `fn_decl` node, or the `var_decl` node).
+/// Finds a top-level `const`/`var`/`fn` declaration named `name`, returning its declaration node (the `fn_decl` node, or the `var_decl` node).
 fn findTopLevelDecl(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
     for (tree.rootDecls()) |decl| {
         switch (tree.nodeTag(decl)) {
@@ -127,8 +117,7 @@ fn findTopLevelDecl(tree: *const Ast, name: []const u8) ?Ast.Node.Index {
     return null;
 }
 
-/// Classifies a resolved top-level declaration node (`fn_decl` or `var_decl`) - the target found
-/// at the end of an alias chain.
+/// Classifies a resolved top-level declaration node (`fn_decl` or `var_decl`) - the target found at the end of an alias chain.
 fn classifyTopLevelDecl(
     document_store: *DocumentStore,
     arena: std.mem.Allocator,
@@ -146,11 +135,7 @@ fn classifyTopLevelDecl(
     return try classifyConstInit(document_store, arena, handle, init_node, .root, depth);
 }
 
-/// Classifies what a `const` declaration's initializer actually declares: a container literal, an
-/// error set, a same-module file import, `@This()`, or (up to `depth` hops) a plain alias into one
-/// of those (`const foo = bar.baz;` where `bar` is itself a resolved import). Falls back to
-/// `.Constant` for anything it can't resolve cheaply - deeper/dynamic aliases need real type
-/// inference, which belongs in hover/goto-definition, not a whole-file outline request.
+/// Classifies what a `const` declaration's initializer actually declares: a container literal, an error set, a same-module file import, `@This()`, or (up to `depth` hops) a plain alias into one of those (`const foo = bar.baz;` where `bar` is itself a resolved import). Falls back to `.Constant` for anything it can't resolve cheaply - deeper/dynamic aliases need real type inference, which belongs in hover/goto-definition, not a whole-file outline request.
 fn classifyConstInit(
     document_store: *DocumentStore,
     arena: std.mem.Allocator,
@@ -200,10 +185,8 @@ pub fn tokenNameMaybeQuotes(tree: *const Ast, token: Ast.TokenIndex) []const u8 
         .string_literal => {
             const name = token_slice[1 .. token_slice.len - 1];
             const trimmed = std.mem.trim(u8, name, &std.ascii.whitespace);
-            // LSP spec requires that a symbol name not be empty or consisting only of whitespace,
-            // don't trim the quotes in that case so there's something to present.
-            // Leading and trailing whitespace might cause ambiguity depending on how the client shows symbols
-            // so compensate for that as well
+            // LSP spec requires that a symbol name not be empty or consisting only of whitespace, don't trim the quotes in that case so there's something to present.
+            // Leading and trailing whitespace might cause ambiguity depending on how the client shows symbols so compensate for that as well
             if (name.len == 0 or name.len != trimmed.len)
                 return token_slice;
 
@@ -422,7 +405,7 @@ pub fn getDocumentSymbols(
     );
 }
 
-/// converts `Symbol` to `types.DocumentSymbol`
+/// converts `Symbol` to `types.DocumentSymbol`.
 fn convertSymbols(
     arena: std.mem.Allocator,
     tree: *const Ast,
@@ -433,9 +416,7 @@ fn convertSymbols(
     var symbol_buffer: std.ArrayList(types.DocumentSymbol) = .empty;
     try symbol_buffer.ensureTotalCapacityPrecise(arena, total_symbol_count);
 
-    // instead of converting every `offsets.Loc` to `types.Range` by calling `offsets.locToRange`
-    // we instead store a mapping from source indices to their desired position, sort them by their source index
-    // and then iterate through them which avoids having to re-iterate through the source file to find out the line number
+    // instead of converting every `offsets.Loc` to `types.Range` by calling `offsets.locToRange` we instead store a mapping from source indices to their desired position, sort them by their source index and then iterate through them which avoids having to re-iterate through the source file to find out the line number
     var mappings: std.ArrayList(offsets.multiple.IndexToPositionMapping) = .empty;
     try mappings.ensureTotalCapacityPrecise(arena, total_symbol_count * 4);
 
