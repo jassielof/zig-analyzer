@@ -1204,12 +1204,17 @@ fn completionHandler(server: *Server, arena: std.mem.Allocator, request: types.c
         else => return error.InvalidParams,
     };
     const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
 
     const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
 
     var analyser = server.initAnalyser(arena, handle);
     defer analyser.deinit();
+
+    if (handle.tree.mode == .zon) {
+        return .{
+            .completion_list = try completions.completeZonManifest(server, &analyser, arena, handle, source_index) orelse return null,
+        };
+    }
 
     return .{
         .completion_list = try completions.completionAtIndex(server, &analyser, arena, handle, source_index) orelse return null,

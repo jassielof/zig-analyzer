@@ -1153,6 +1153,165 @@ fn completeBuildModuleStringLiteral(builder: *Builder, loc: offsets.Loc, depende
     setFullStringLiteralTextEdit(builder, loc);
 }
 
+const ZonManifestField = enum { dependency_path, top_level_paths };
+
+/// If `source_index` is inside a string literal that's either a `.dependencies.*.path` value or an
+/// element of the top-level `.paths` list, returns which kind, plus the string-literal node itself
+/// (so the caller can compute its content span). Only recognizes exactly these two fields.
+///
+/// This is checked structurally (walking the parsed ZON manifest), not through
+/// `Analyser.getPositionContext`'s tokenizer, since - unlike `@import("|")` or `b.dependency("|")`
+/// - there's no preceding-token pattern that distinguishes these two fields from any other
+/// `.name = "string"` pair in the manifest; only the AST position (which field, of which top-level
+/// key) does.
+fn classifyZonManifestStringLiteral(tree: *const Ast, source_index: usize) ?struct { field: ZonManifestField, node: Ast.Node.Index } {
+    var buffer: [2]Ast.Node.Index = undefined;
+    const root_struct = tree.fullStructInit(&buffer, tree.nodeData(.root).node) orelse return null;
+
+    for (root_struct.ast.fields) |value_node| {
+        const name_token = tree.firstToken(value_node) - 2;
+        if (tree.tokenTag(name_token) != .identifier) continue;
+        const field_name = tree.tokenSlice(name_token);
+
+        if (std.mem.eql(u8, field_name, "paths")) {
+            var array_buffer: [2]Ast.Node.Index = undefined;
+            const paths_array = tree.fullArrayInit(&array_buffer, value_node) orelse continue;
+            for (paths_array.ast.elements) |element| {
+                if (tree.nodeTag(element) != .string_literal) continue;
+                const loc = offsets.nodeToLoc(tree, element);
+                if (loc.start <= source_index and source_index <= loc.end) {
+                    return .{ .field = .top_level_paths, .node = element };
+                }
+            }
+        } else if (std.mem.eql(u8, field_name, "dependencies")) {
+            var deps_buffer: [2]Ast.Node.Index = undefined;
+            const deps_struct = tree.fullStructInit(&deps_buffer, value_node) orelse continue;
+            for (deps_struct.ast.fields) |dep_value_node| {
+                var dep_buffer: [2]Ast.Node.Index = undefined;
+                const dep_struct = tree.fullStructInit(&dep_buffer, dep_value_node) orelse continue;
+                for (dep_struct.ast.fields) |dep_field_value| {
+                    const dep_field_name_token = tree.firstToken(dep_field_value) - 2;
+                    if (tree.tokenTag(dep_field_name_token) != .identifier) continue;
+                    if (!std.mem.eql(u8, tree.tokenSlice(dep_field_name_token), "path")) continue;
+                    if (tree.nodeTag(dep_field_value) != .string_literal) continue;
+
+                    const loc = offsets.nodeToLoc(tree, dep_field_value);
+                    if (loc.start <= source_index and source_index <= loc.end) {
+                        return .{ .field = .dependency_path, .node = dep_field_value };
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// Completes a filesystem path inside a `build.zig.zon`'s `.dependencies.*.path` (directories
+/// only - a dependency path points at another package root) or top-level `.paths` (files and
+/// directories - the manifest's list of included paths) string literal. Mirrors
+/// `completeFileSystemStringLiteral`'s path-segment-aware insert/replace logic, since that function
+/// is keyed off `Analyser.PositionContext` and this isn't detected through that.
+fn completeZonManifestStringLiteral(builder: *Builder, node: Ast.Node.Index, directories_only: bool) Analyser.Error!void {
+    const io = builder.server.io;
+    const tree = &builder.orig_handle.tree;
+    const source = tree.source;
+
+    var string_content_loc = offsets.tokenToLoc(tree, tree.nodeMainToken(node));
+    if (source[string_content_loc.start] == '"') string_content_loc.start += 1;
+    if (string_content_loc.end > string_content_loc.start and source[string_content_loc.end - 1] == '"') string_content_loc.end -= 1;
+
+    if (builder.source_index < string_content_loc.start or string_content_loc.end < builder.source_index) return;
+
+    const previous_separator_index: ?usize = blk: {
+        var index: usize = builder.source_index;
+        break :blk while (index > string_content_loc.start) : (index -= 1) {
+            if (std.Io.Dir.path.isSep(source[index - 1])) break index - 1;
+        } else null;
+    };
+    const next_separator_index: ?usize = for (builder.source_index..string_content_loc.end) |index| {
+        if (std.Io.Dir.path.isSep(source[index])) break index;
+    } else null;
+
+    const completing = offsets.locToSlice(source, .{ .start = string_content_loc.start, .end = previous_separator_index orelse string_content_loc.start });
+    if (std.Io.Dir.path.isAbsolute(completing)) return; // dependency/manifest paths are always project-relative
+
+    const after_separator_index = if (previous_separator_index) |index| index + 1 else string_content_loc.start;
+    const insert_loc: offsets.Loc = .{ .start = after_separator_index, .end = builder.source_index };
+    const replace_loc: offsets.Loc = .{ .start = after_separator_index, .end = next_separator_index orelse string_content_loc.end };
+
+    const insert_range = offsets.locToRange(source, insert_loc, builder.server.offset_encoding);
+    const replace_range = offsets.locToRange(source, replace_loc, builder.server.offset_encoding);
+
+    const document_path = builder.orig_handle.uri.toFsPath(builder.arena) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedScheme => return,
+    };
+    const base_dir = std.Io.Dir.path.dirname(document_path) orelse return;
+    const dir_path = try std.Io.Dir.path.join(builder.arena, &.{ base_dir, completing });
+
+    var iterable_dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+    defer iterable_dir.close(io);
+    var it = iterable_dir.iterateAssumeFirstIteration();
+
+    while (it.next(io)) |opt_entry| {
+        const entry = opt_entry orelse break;
+        switch (entry.kind) {
+            .file => if (directories_only) continue,
+            .directory => {},
+            else => continue,
+        }
+
+        const label = try builder.arena.dupe(u8, entry.name);
+        const insert_text = if (entry.kind == .directory)
+            if (next_separator_index == null)
+                try std.fmt.allocPrint(builder.arena, "{s}/", .{entry.name})
+            else
+                label
+        else
+            label;
+
+        const score: u4 = if (entry.kind == .file) 6 else 5;
+
+        try builder.completions.append(builder.arena, .{
+            .label = label,
+            .kind = if (entry.kind == .file) .File else .Folder,
+            .textEdit = createTextEdit(builder, .{ .newText = insert_text, .insert = insert_range, .replace = replace_range }),
+            .sortText = try generateSortText(builder.arena, score, label),
+        });
+    } else |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {},
+    }
+}
+
+/// Entry point for completions in a `build.zig.zon` manifest - the only `.zon` completions
+/// supported, scoped strictly to `.dependencies.*.path` and top-level `.paths` string literals.
+pub fn completeZonManifest(
+    server: *Server,
+    analyser: *Analyser,
+    arena: std.mem.Allocator,
+    handle: *DocumentStore.Handle,
+    source_index: usize,
+) Analyser.Error!?types.completion.List {
+    if (!std.mem.endsWith(u8, handle.uri.raw, "/build.zig.zon")) return null;
+    const classified = classifyZonManifestStringLiteral(&handle.tree, source_index) orelse return null;
+
+    var builder: Builder = .{
+        .server = server,
+        .analyser = analyser,
+        .arena = arena,
+        .orig_handle = handle,
+        .source_index = source_index,
+        .completions = .empty,
+        .use_snippets = false,
+    };
+    try completeZonManifestStringLiteral(&builder, classified.node, classified.field == .dependency_path);
+    return .{ .isIncomplete = false, .items = builder.completions.items() };
+}
+
 pub fn completionAtIndex(
     server: *Server,
     analyser: *Analyser,
