@@ -10,9 +10,3 @@
 [submodule "dependencies/docent"]
 	path = dependencies/docent
 	url = https://github.com/jassielof/docent
-[submodule "zigtools-lsp"]
-	path = zigtools-lsp
-	url = https://github.com/zigtools/lsp-kit
-[submodule "zls"]
-	path = zls
-	url = https://github.com/zigtools/zls
