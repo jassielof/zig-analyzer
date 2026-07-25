@@ -65,6 +65,9 @@ enable_unused_decl_diagnostics: bool = true,
 /// Report identifiers that don't follow the Zig naming conventions (camelCase functions, PascalCase types, snake_case constants/fields/namespaces) as hint diagnostics. Reuses docent's `identifier_case` rule.
 enable_naming_convention_diagnostics: bool = true,
 
+/// Show a warning message when the Zig executable or its standard library directory could not be found/resolved.
+warn_zig_executable_not_found: bool = true,
+
 /// Prefer running `zig ast-check` as a child process instead of the built-in AstGen path.
 prefer_ast_check_as_child_process: bool = true,
 

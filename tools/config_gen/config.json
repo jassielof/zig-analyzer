@@ -140,6 +140,13 @@
             "vscode": "namingConventionDiagnostics"
         },
         {
+            "name": "warn_zig_executable_not_found",
+            "description": "Show a warning message when the Zig executable or its standard library directory could not be found/resolved.",
+            "type": "bool",
+            "default": true,
+            "vscode": "warnZigExecutableNotFound"
+        },
+        {
             "name": "prefer_ast_check_as_child_process",
             "description": "Prefer running `zig ast-check` as a child process instead of the built-in AstGen path.",
             "type": "bool",

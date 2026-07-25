@@ -999,7 +999,8 @@ pub fn resolveConfiguration(server: *Server) error{ Canceled, OutOfMemory }!void
         if (!std.process.can_spawn) break :check;
         if (server.status != .initialized) break :check;
 
-        // TODO there should a way to suppress this message
+        if (!server.config_manager.config.warn_zig_executable_not_found) break :check;
+
         if (server.config_manager.zig_exe == null) {
             server.showMessage(.Warning, "zig executable could not be found", .{});
         } else if (server.config_manager.zig_lib_dir == null) {

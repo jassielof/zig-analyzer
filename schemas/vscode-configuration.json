@@ -148,6 +148,12 @@
     "description": "Report identifiers that don't follow the Zig naming conventions (camelCase functions, PascalCase types, snake_case constants/fields/namespaces) as hint diagnostics. Reuses docent's `identifier_case` rule.",
     "default": true
   },
+  "zigAnalyzer.warnZigExecutableNotFound": {
+    "scope": "resource",
+    "type": "boolean",
+    "description": "Show a warning message when the Zig executable or its standard library directory could not be found/resolved.",
+    "default": true
+  },
   "zigAnalyzer.preferAstCheckAsChildProcess": {
     "scope": "resource",
     "type": "boolean",
