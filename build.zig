@@ -4,9 +4,6 @@ const builtin = @import("builtin");
 const fangz_build = @import("fangz");
 
 const package_version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch unreachable;
-/// The Zig version this project (and its vendored docs - see `lib/langref`, `lib/manifest`)
-/// targets. Single source of truth; nothing else duplicates this string.
-const pinned_zig_version: []const u8 = @import("build.zig.zon").minimum_zig_version;
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -88,11 +85,10 @@ pub fn build(b: *std.Build) !void {
     };
 
     { // zig build update-langref
-        // Refetches the Language Reference for the pinned Zig version (build.zig.zon's
-        // `minimum_zig_version`) and vendors it into the source tree. Not part of the default
-        // build graph - run by hand after bumping that version (the `builtin_docs` module's
-        // staleness test in `zig build test` will complain until this is run).
-        const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{pinned_zig_version});
+        // Refetches the Language Reference for the currently-compiling Zig version and vendors
+        // it into the source tree. Not part of the default build graph - run by hand whenever
+        // the toolchain's Zig version changes.
+        const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{builtin.zig_version_string});
         const markitdown = b.addSystemCommand(&.{"uv"});
         markitdown.addArgs(&.{ "run", "markitdown" });
         markitdown.setName("markitdown langref");
@@ -115,12 +111,12 @@ pub fn build(b: *std.Build) !void {
     });
 
     { // zig build update-manifest-docs
-        // Refetches the upstream `build.zig.zon` field documentation for the pinned Zig version
-        // and vendors it into the source tree. Not part of the default build graph, same story
-        // as update-langref above.
+        // Refetches the upstream `build.zig.zon` field documentation for the currently-compiling
+        // Zig version and vendors it into the source tree. Not part of the default build graph,
+        // same story as update-langref above.
         const manifest_docs_url = b.fmt(
             "https://codeberg.org/ziglang/zig/raw/tag/{s}/doc/build.zig.zon.md",
-            .{pinned_zig_version},
+            .{builtin.zig_version_string},
         );
         const fetch_manifest_docs = b.addRunArtifact(fetch_exe);
         fetch_manifest_docs.setName("fetch build.zig.zon manifest docs");
