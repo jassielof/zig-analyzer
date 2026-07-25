@@ -1316,10 +1316,13 @@ fn hoverHandler(server: *Server, arena: std.mem.Allocator, request: types.Hover.
         else => return error.InvalidParams,
     };
     const handle = server.document_store.getHandle(document_uri) orelse return null;
-    if (handle.tree.mode == .zon) return null;
     const source_index = offsets.positionToIndex(handle.tree.source, request.position, server.offset_encoding);
 
     const markup_kind: types.MarkupKind = if (server.client_capabilities.hover_supports_md) .markdown else .plaintext;
+
+    if (handle.tree.mode == .zon) {
+        return hover_handler.hoverZonManifest(handle, source_index, markup_kind, server.offset_encoding);
+    }
 
     var analyser = server.initAnalyser(arena, handle);
     defer analyser.deinit();
