@@ -7,6 +7,7 @@
 //! parsed out of its `###`/`####` headings once, lazily, at runtime.
 const std = @import("std");
 const builtin = @import("builtin");
+const doc_version = @import("doc_version");
 
 const manifest_md = @embedFile("build.zig.zon.md");
 
@@ -106,12 +107,11 @@ pub fn getDependencyField(field_name: []const u8) ?[]const u8 {
     return ensureParsed().dependency_field.get(field_name);
 }
 
-test "vendored manifest docs match the compiling Zig version" {
-    const vendored_version = std.mem.trim(u8, @embedFile("ZIG_VERSION"), &std.ascii.whitespace);
-    if (!std.mem.eql(u8, vendored_version, builtin.zig_version_string)) {
+test "compiling Zig version matches build.zig.zon's pinned minimum_zig_version" {
+    if (!std.mem.eql(u8, doc_version.pinned_zig_version, builtin.zig_version_string)) {
         std.debug.print(
-            "lib/manifest/build.zig.zon.md was vendored for Zig {s}, but this build is using Zig {s}. Run `zig build update-manifest-docs`.\n",
-            .{ vendored_version, builtin.zig_version_string },
+            "lib/manifest/build.zig.zon.md is vendored for Zig {s} (build.zig.zon's minimum_zig_version), but this build is using Zig {s}. Bump minimum_zig_version and run `zig build update-manifest-docs`.\n",
+            .{ doc_version.pinned_zig_version, builtin.zig_version_string },
         );
         return error.VendoredManifestDocsStale;
     }

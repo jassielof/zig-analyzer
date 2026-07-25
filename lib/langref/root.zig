@@ -7,6 +7,7 @@
 //! once lazily at runtime.
 const std = @import("std");
 const builtin = @import("builtin");
+const doc_version = @import("doc_version");
 
 pub const Builtin = struct {
     pub const Parameter = struct {
@@ -50,12 +51,11 @@ pub fn get(name: []const u8) ?Builtin {
     return ensureParsed().get(name);
 }
 
-test "vendored langref matches the compiling Zig version" {
-    const vendored_version = std.mem.trim(u8, @embedFile("ZIG_VERSION"), &std.ascii.whitespace);
-    if (!std.mem.eql(u8, vendored_version, builtin.zig_version_string)) {
+test "compiling Zig version matches build.zig.zon's pinned minimum_zig_version" {
+    if (!std.mem.eql(u8, doc_version.pinned_zig_version, builtin.zig_version_string)) {
         std.debug.print(
-            "lib/langref/langref.md was vendored for Zig {s}, but this build is using Zig {s}. Run `zig build update-langref`.\n",
-            .{ vendored_version, builtin.zig_version_string },
+            "lib/langref/langref.md is vendored for Zig {s} (build.zig.zon's minimum_zig_version), but this build is using Zig {s}. Bump minimum_zig_version and run `zig build update-langref`.\n",
+            .{ doc_version.pinned_zig_version, builtin.zig_version_string },
         );
         return error.VendoredLangrefStale;
     }
