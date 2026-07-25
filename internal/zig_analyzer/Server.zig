@@ -147,11 +147,12 @@ pub const Status = enum {
     exiting_failure,
 };
 
+/// Sends a response to a request the client sent us. Unlike `sendToClientRequestFor` /
+/// `sendToClientNotification`, there's no single call site with a comptime-known method for every
+/// caller - the `.other` (unrecognized method) branch in `processMessage` has no method to
+/// validate against - so this stays unchecked. Prefer `sendToClientResponseFor` wherever the
+/// method is actually known.
 fn sendToClientResponse(server: *Server, id: json_rpc.JsonRPCMessage.ID, result: anytype) error{ Canceled, OutOfMemory }![]u8 {
-    // TODO validate result type is a possible response
-    // TODO validate response is from a client to server request
-    // TODO validate result type
-
     const response: json_rpc.TypedJsonRPCResponse(@TypeOf(result)) = .{
         .id = id,
         .result_or_error = .{ .result = result },
@@ -159,10 +160,25 @@ fn sendToClientResponse(server: *Server, id: json_rpc.JsonRPCMessage.ID, result:
     return try sendToClientInternal(server.io, server.allocator, server.transport, response);
 }
 
-fn sendToClientRequest(server: *Server, id: json_rpc.JsonRPCMessage.ID, method: []const u8, params: anytype) error{ Canceled, OutOfMemory }![]u8 {
-    // TODO validate method is a request
-    // TODO validate method is server to client
-    // TODO validate params type
+/// Like `sendToClientResponse`, but validates at comptime that `method` is a request the client
+/// can send us (`client_to_server`/`both`) and that `result` is that request's actual result type.
+fn sendToClientResponseFor(server: *Server, comptime method: []const u8, id: json_rpc.JsonRPCMessage.ID, result: lsp.ResultType(method)) error{ Canceled, OutOfMemory }![]u8 {
+    comptime {
+        std.debug.assert(lsp.isRequestMethod(method));
+        const metadata = types.requests.get(method).?;
+        std.debug.assert(metadata.direction == .client_to_server or metadata.direction == .both);
+    }
+    return try server.sendToClientResponse(id, result);
+}
+
+/// Validates at comptime that `method` is a request the server can send the client
+/// (`server_to_client`/`both`) and that `params` is that request's actual params type.
+fn sendToClientRequest(server: *Server, id: json_rpc.JsonRPCMessage.ID, comptime method: []const u8, params: lsp.ParamsType(method)) error{ Canceled, OutOfMemory }![]u8 {
+    comptime {
+        std.debug.assert(lsp.isRequestMethod(method));
+        const metadata = types.requests.get(method).?;
+        std.debug.assert(metadata.direction == .server_to_client or metadata.direction == .both);
+    }
 
     const request: json_rpc.TypedJsonRPCRequest(@TypeOf(params)) = .{
         .id = id,
@@ -172,10 +188,14 @@ fn sendToClientRequest(server: *Server, id: json_rpc.JsonRPCMessage.ID, method: 
     return try sendToClientInternal(server.io, server.allocator, server.transport, request);
 }
 
-fn sendToClientNotification(server: *Server, method: []const u8, params: anytype) error{ Canceled, OutOfMemory }![]u8 {
-    // TODO validate method is a notification
-    // TODO validate method is server to client
-    // TODO validate params type
+/// Validates at comptime that `method` is a notification the server can send the client
+/// (`server_to_client`/`both`) and that `params` is that notification's actual params type.
+fn sendToClientNotification(server: *Server, comptime method: []const u8, params: lsp.ParamsType(method)) error{ Canceled, OutOfMemory }![]u8 {
+    comptime {
+        std.debug.assert(lsp.isNotificationMethod(method));
+        const metadata = types.notifications.get(method).?;
+        std.debug.assert(metadata.direction == .server_to_client or metadata.direction == .both);
+    }
 
     const notification: json_rpc.TypedJsonRPCNotification(@TypeOf(params)) = .{
         .method = method,
@@ -1839,7 +1859,7 @@ fn processMessage(server: *Server, arena: std.mem.Allocator, message: Message) E
             .other => return try server.sendToClientResponse(request.id, @as(?void, null)),
             inline else => |params, method| {
                 const result = try server.sendRequestSync(arena, @tagName(method), params);
-                return try server.sendToClientResponse(request.id, result);
+                return try server.sendToClientResponseFor(@tagName(method), request.id, result);
             },
         },
         .notification => |notification| switch (notification.params) {
