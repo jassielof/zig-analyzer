@@ -53,14 +53,10 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    // Exposes `pinned_zig_version` (== build.zig.zon's `minimum_zig_version`, the single source
-    // of truth for which Zig version this project - and its vendored docs - targets) to the doc
-    // modules below, instead of duplicating that string into a separate marker file per module.
-    const doc_version_module = blk: {
-        const doc_version_options = b.addOptions();
-        doc_version_options.addOption([]const u8, "pinned_zig_version", pinned_zig_version);
-        break :blk doc_version_options.createModule();
-    };
+    // build.zig.zon itself, importable as a plain module (same file `@import("build.zig.zon")`
+    // above resolves for build.zig) - lets the doc modules below read `minimum_zig_version`
+    // directly instead of it being duplicated into a marker file per module.
+    const build_zig_zon_module = b.createModule(.{ .root_source_file = b.path("build.zig.zon") });
 
     const builtin_docs_module = blk: {
         // `lib/langref/langref.md` is a vendored Markitdown conversion of the rendered Language
@@ -93,7 +89,7 @@ pub fn build(b: *std.Build) !void {
                     .name = "builtins_embed",
                     .module = b.createModule(.{ .root_source_file = embed_src }),
                 },
-                .{ .name = "doc_version", .module = doc_version_module },
+                .{ .name = "build_zig_zon", .module = build_zig_zon_module },
             },
         });
         break :blk module;
@@ -125,7 +121,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "doc_version", .module = doc_version_module },
+            .{ .name = "build_zig_zon", .module = build_zig_zon_module },
         },
     });
 
@@ -387,7 +383,7 @@ pub fn build(b: *std.Build) !void {
     }
 }
 
-/// Returns `MAJOR.MINOR.PATCH-dev` when `git describe` failed.
+/// Returns `base_version`, or the `-Dversion-string` override if one was passed.
 fn getVersion(b: *std.Build, base_version: std.SemanticVersion) std.SemanticVersion {
     const version_string = b.option([]const u8, "version-string", "Override the version of this build. Must be a semantic version.");
     if (version_string) |semver_string| {
@@ -395,50 +391,5 @@ fn getVersion(b: *std.Build, base_version: std.SemanticVersion) std.SemanticVers
             std.debug.panic("Expected -Dversion-string={s} to be a semantic version: {}", .{ semver_string, err });
         };
     }
-
-    if (base_version.pre == null) return base_version;
-
-    const argv: []const []const u8 = &.{
-        "git", "-C", b.pathFromRoot("."), "--git-dir", ".git", "describe", "--match", "*.*.*", "--tags",
-    };
-    var code: u8 = undefined;
-    const git_describe_untrimmed = b.runAllowFail(argv, &code, .ignore) catch |err| {
-        const argv_joined = std.mem.join(b.allocator, " ", argv) catch @panic("OOM");
-        std.log.warn(
-            \\Failed to run git describe to resolve the version: {}
-            \\command: {s}
-            \\
-            \\Consider passing the -Dversion-string flag to specify the version.
-        , .{ err, argv_joined });
-        return base_version;
-    };
-
-    const git_describe = std.mem.trim(u8, git_describe_untrimmed, " \n\r");
-
-    switch (std.mem.count(u8, git_describe, "-")) {
-        0 => {
-            // Tagged release version (e.g. 0.10.0).
-            return base_version;
-        },
-        2 => {
-            // Untagged development build (e.g. 0.10.0-dev.216+34ce200).
-            var it = std.mem.splitScalar(u8, git_describe, '-');
-            const tagged_ancestor = it.first();
-            const commit_height = it.next().?;
-            const commit_id = it.next().?;
-            _ = tagged_ancestor;
-
-            return .{
-                .major = base_version.major,
-                .minor = base_version.minor,
-                .patch = base_version.patch,
-                .pre = b.fmt("dev.{s}", .{commit_height}),
-                .build = if (std.mem.startsWith(u8, commit_id, "g")) commit_id[1..] else commit_id,
-            };
-        },
-        else => {
-            std.debug.print("Unexpected 'git describe' output: '{s}'\n", .{git_describe});
-            return base_version;
-        },
-    }
+    return base_version;
 }
