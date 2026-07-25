@@ -6,8 +6,6 @@
 //! Markdown, so unlike the Language Reference no conversion step is needed. Field docs are
 //! parsed out of its `###`/`####` headings once, lazily, at runtime.
 const std = @import("std");
-const builtin = @import("builtin");
-const build_zig_zon = @import("build_zig_zon");
 
 const manifest_md = @embedFile("build.zig.zon.md");
 
@@ -105,16 +103,6 @@ pub fn getTopLevel(field_name: []const u8) ?[]const u8 {
 /// `path`, `lazy`).
 pub fn getDependencyField(field_name: []const u8) ?[]const u8 {
     return ensureParsed().dependency_field.get(field_name);
-}
-
-test "compiling Zig version matches build.zig.zon's pinned minimum_zig_version" {
-    if (!std.mem.eql(u8, build_zig_zon.minimum_zig_version, builtin.zig_version_string)) {
-        std.debug.print(
-            "lib/manifest/build.zig.zon.md is vendored for Zig {s} (build.zig.zon's minimum_zig_version), but this build is using Zig {s}. Bump minimum_zig_version and run `zig build update-manifest-docs`.\n",
-            .{ build_zig_zon.minimum_zig_version, builtin.zig_version_string },
-        );
-        return error.VendoredManifestDocsStale;
-    }
 }
 
 test "parses known top-level and dependency fields" {

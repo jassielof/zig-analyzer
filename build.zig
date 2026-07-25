@@ -53,11 +53,6 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    // build.zig.zon itself, importable as a plain module (same file `@import("build.zig.zon")`
-    // above resolves for build.zig) - lets the doc modules below read `minimum_zig_version`
-    // directly instead of it being duplicated into a marker file per module.
-    const build_zig_zon_module = b.createModule(.{ .root_source_file = b.path("build.zig.zon") });
-
     const builtin_docs_module = blk: {
         // `lib/langref/langref.md` is a vendored Markitdown conversion of the rendered Language
         // Reference (see `zig build update-langref` below to refresh it) - no network access or
@@ -89,7 +84,6 @@ pub fn build(b: *std.Build) !void {
                     .name = "builtins_embed",
                     .module = b.createModule(.{ .root_source_file = embed_src }),
                 },
-                .{ .name = "build_zig_zon", .module = build_zig_zon_module },
             },
         });
         break :blk module;
@@ -120,9 +114,6 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("lib/manifest/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "build_zig_zon", .module = build_zig_zon_module },
-        },
     });
 
     { // zig build update-manifest-docs
