@@ -415,7 +415,7 @@ fn handleUnusedFunctionParameter(builder: *Builder, loc: offsets.Loc) error{OutO
 
     const insert_token = tree.nodeMainToken(block);
     const add_suffix_newline = is_last_param and tree.tokenTag(insert_token + 1) == .r_brace and tree.tokensOnSameLine(insert_token, insert_token + 1);
-    const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, true, add_suffix_newline);
+    const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, true, add_suffix_newline, true);
 
     if (builder.wantKind(.@"source.fixAll")) {
         try builder.fixall_text_edits.insert(builder.arena, 0, builder.createTextEditPos(insert_index, new_text));
@@ -457,14 +457,15 @@ fn handleUnusedVariableOrConstant(builder: *Builder, loc: offsets.Loc) error{Out
     if (insert_token >= tree.tokens.len) return;
     if (tree.tokenTag(insert_token) != .semicolon) return;
 
-    const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, false, false);
-
     if (builder.wantKind(.@"source.fixAll")) {
+        const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, false, false, true);
         try builder.fixall_text_edits.append(builder.arena, builder.createTextEditPos(insert_index, new_text));
     }
 
     if (builder.wantKind(.quickfix)) {
-        // TODO add no `// autofix` comment
+        // A manual quickfix is a deliberate one-time action, not a placeholder for later cleanup,
+        // so it doesn't need the `// autofix` marker that `zig build --fix`-style tooling looks for.
+        const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, false, false, false);
         try builder.actions.append(builder.arena, .{
             .title = "discard value",
             .kind = .quickfix,
@@ -563,7 +564,7 @@ fn handleUnusedCapture(
     // if we are on the last capture of the block, we need to add an additional newline
     // i.e |a, b| { ... } -> |a, b| { ... \n_ = a; \n_ = b;\n }
     const add_suffix_newline = is_last_capture and tree.tokenTag(insert_token + 1) == .r_brace and tree.tokensOnSameLine(insert_token, insert_token + 1);
-    const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, true, add_suffix_newline);
+    const insert_index, const new_text = try createDiscardText(builder, identifier_full_name, insert_token, true, add_suffix_newline, true);
 
     try builder.fixall_text_edits.insert(builder.arena, 0, builder.createTextEditPos(insert_index, new_text));
 }
@@ -1005,6 +1006,7 @@ fn createDiscardText(
     insert_token: Ast.TokenIndex,
     add_block_indentation: bool,
     add_suffix_newline: bool,
+    add_autofix_comment: bool,
 ) error{OutOfMemory}!struct {
     /// insert index
     usize,
@@ -1028,13 +1030,15 @@ fn createDiscardText(
     };
     const additional_indent = if (add_block_indentation) detectIndentation(tree.source) else "";
 
+    const discard_suffix = if (add_autofix_comment) "; // autofix" else ";";
+
     const new_text_len =
         "\n".len +
         indent.len +
         additional_indent.len +
         "_ = ".len +
         identifier_name.len +
-        "; // autofix".len +
+        discard_suffix.len +
         if (add_suffix_newline) 1 + indent.len else 0;
     var new_text: std.ArrayList(u8) = try .initCapacity(builder.arena, new_text_len);
 
@@ -1043,7 +1047,7 @@ fn createDiscardText(
     new_text.appendSliceAssumeCapacity(additional_indent);
     new_text.appendSliceAssumeCapacity("_ = ");
     new_text.appendSliceAssumeCapacity(identifier_name);
-    new_text.appendSliceAssumeCapacity("; // autofix");
+    new_text.appendSliceAssumeCapacity(discard_suffix);
     if (add_suffix_newline) {
         new_text.appendAssumeCapacity('\n');
         new_text.appendSliceAssumeCapacity(indent);
