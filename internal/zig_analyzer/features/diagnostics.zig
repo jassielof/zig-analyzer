@@ -268,7 +268,6 @@ pub fn getAstCheckDiagnostics(server: *Server, handle: *DocumentStore.Handle) er
 
     if (std.process.can_spawn and
         config.prefer_ast_check_as_child_process and
-        handle.tree.mode == .zig and // TODO pass `--zon` if available
         config.zig_exe_path != null)
     {
         return getErrorBundleFromAstCheck(
@@ -276,6 +275,7 @@ pub fn getAstCheckDiagnostics(server: *Server, handle: *DocumentStore.Handle) er
             server.allocator,
             config.zig_exe_path.?,
             handle.tree.source,
+            handle.tree.mode,
         ) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {
@@ -316,11 +316,19 @@ fn getErrorBundleFromAstCheck(
     allocator: std.mem.Allocator,
     zig_exe_path: []const u8,
     source: [:0]const u8,
+    mode: Ast.Mode,
 ) !std.zig.ErrorBundle {
     comptime std.debug.assert(std.process.can_spawn);
 
+    const argv: []const []const u8 = switch (mode) {
+        .zig => &.{ zig_exe_path, "ast-check", "--color", "off" },
+        // `--zon` is needed because ast-check otherwise infers the mode from the piped source's
+        // (nonexistent, since it's read from stdin) file extension, always defaulting to `.zig`.
+        .zon => &.{ zig_exe_path, "ast-check", "--color", "off", "--zon" },
+    };
+
     var process = std.process.spawn(io, .{
-        .argv = &.{ zig_exe_path, "ast-check", "--color", "off" },
+        .argv = argv,
         .stdin = .pipe,
         .stdout = .ignore,
         .stderr = .pipe,
