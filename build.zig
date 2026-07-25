@@ -12,14 +12,12 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const resolved_version = getVersion(b, package_version);
-
     const build_options = blk: {
         const build_options = b.addOptions();
         build_options.step.name = "zig-analyzer build options";
 
-        build_options.addOption(std.SemanticVersion, "version", resolved_version);
-        build_options.addOption([]const u8, "version_string", b.fmt("{f}", .{resolved_version}));
+        build_options.addOption(std.SemanticVersion, "version", package_version);
+        build_options.addOption([]const u8, "version_string", b.fmt("{f}", .{package_version}));
 
         break :blk build_options.createModule();
     };
@@ -372,15 +370,4 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&b.addRunArtifact(builtin_docs_tests).step);
         test_step.dependOn(&b.addRunArtifact(manifest_docs_tests).step);
     }
-}
-
-/// Returns `base_version`, or the `-Dversion-string` override if one was passed.
-fn getVersion(b: *std.Build, base_version: std.SemanticVersion) std.SemanticVersion {
-    const version_string = b.option([]const u8, "version-string", "Override the version of this build. Must be a semantic version.");
-    if (version_string) |semver_string| {
-        return std.SemanticVersion.parse(semver_string) catch |err| {
-            std.debug.panic("Expected -Dversion-string={s} to be a semantic version: {}", .{ semver_string, err });
-        };
-    }
-    return base_version;
 }
