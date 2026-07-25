@@ -23,7 +23,7 @@ pub const DocumentScope = @import("DocumentScope.zig");
 pub const Declaration = DocumentScope.Declaration;
 pub const Scope = DocumentScope.Scope;
 
-const version_data = @import("version_data");
+const version_data = @import("builtin_docs");
 
 const Analyser = @This();
 

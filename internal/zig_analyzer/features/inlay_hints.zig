@@ -11,7 +11,7 @@ const offsets = @import("../offsets.zig");
 const ast = @import("../ast.zig");
 const Config = @import("../Config.zig");
 
-const data = @import("version_data");
+const data = @import("builtin_docs");
 
 /// don't show inlay hints for builtin functions whose parameter names carry no
 /// meaningful information or are trivial deductible based on the builtin name.

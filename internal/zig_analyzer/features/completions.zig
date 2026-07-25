@@ -14,7 +14,7 @@ const Uri = @import("../Uri.zig");
 const DocumentScope = @import("../DocumentScope.zig");
 const analyser_completions = @import("../analyser/completions.zig");
 
-const version_data = @import("version_data");
+const version_data = @import("builtin_docs");
 const snippets = @import("../snippets.zig");
 
 const Builder = struct {

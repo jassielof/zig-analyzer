@@ -10,7 +10,7 @@ const types = @import("lsp").types;
 const ast = @import("../ast.zig");
 const offsets = @import("../offsets.zig");
 
-const data = @import("version_data");
+const data = @import("builtin_docs");
 
 fn fnProtoToSignatureInfo(
     analyser: *Analyser,

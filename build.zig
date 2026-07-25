@@ -38,22 +38,25 @@ pub fn build(b: *std.Build) !void {
         }),
     });
 
-    const version_data_module = blk: {
-        // Fetch + convert the rendered Language Reference via Markitdown CLI.
-        // Output is cached by the Zig build system keyed on the command line
-        // (including the docs URL / compiler version).
-        const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{builtin.zig_version_string});
-        const markitdown = b.addSystemCommand(&.{"uv"});
-        markitdown.addArgs(&.{ "run", "markitdown" });
-        markitdown.setName("markitdown langref");
-        markitdown.addArg("--output");
-        const langref_md = markitdown.addOutputFileArg("langref.md");
-        markitdown.addArg(docs_url);
-        markitdown.expectExitCode(0);
+    // Generic URL -> file downloader (Zig's own std.http.Client instead of shelling out to
+    // curl/wget). Only used by the `update-*` steps below, which vendor their fetched file back
+    // into the source tree - never part of the default build graph.
+    const fetch_exe = b.addExecutable(.{
+        .name = "zig_analyzer_fetch_file",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/fetch_file/main.zig"),
+            .target = b.graph.host,
+            .single_threaded = true,
+        }),
+    });
 
+    const builtin_docs_module = blk: {
+        // `lib/langref/langref.md` is a vendored Markitdown conversion of the rendered Language
+        // Reference (see `zig build update-langref` below to refresh it) - no network access or
+        // conversion happens during a normal build.
         const gen_builtins_cmd = b.addRunArtifact(gen_exe);
         gen_builtins_cmd.addArg("--langref-path");
-        gen_builtins_cmd.addFileArg(langref_md);
+        gen_builtins_cmd.addFileArg(b.path("lib/langref/langref.md"));
         gen_builtins_cmd.addArg("--generate-builtins-json");
         const builtins_json_path = gen_builtins_cmd.addOutputFileArg("builtins.json");
 
@@ -70,7 +73,9 @@ pub fn build(b: *std.Build) !void {
         );
 
         const module = b.createModule(.{
-            .root_source_file = b.path("internal/zig_analyzer/version_data.zig"),
+            .root_source_file = b.path("lib/langref/root.zig"),
+            .target = target,
+            .optimize = optimize,
             .imports = &.{
                 .{
                     .name = "builtins_embed",
@@ -80,6 +85,60 @@ pub fn build(b: *std.Build) !void {
         });
         break :blk module;
     };
+
+    { // zig build update-langref
+        // Refetches the Language Reference for the currently-compiling Zig version and vendors
+        // it into the source tree. Not part of the default build graph - run by hand whenever
+        // the toolchain's Zig version changes (the `builtin_docs` module's staleness test in
+        // `zig build test` will complain until this is run).
+        const docs_url = b.fmt("https://ziglang.org/documentation/{s}/", .{builtin.zig_version_string});
+        const markitdown = b.addSystemCommand(&.{"uv"});
+        markitdown.addArgs(&.{ "run", "markitdown" });
+        markitdown.setName("markitdown langref");
+        markitdown.addArg("--output");
+        const langref_md = markitdown.addOutputFileArg("langref.md");
+        markitdown.addArg(docs_url);
+        markitdown.expectExitCode(0);
+
+        const update_source = b.addUpdateSourceFiles();
+        update_source.addCopyFileToSource(langref_md, "lib/langref/langref.md");
+        update_source.addBytesToSource(
+            b.fmt("{s}\n", .{builtin.zig_version_string}),
+            "lib/langref/ZIG_VERSION",
+        );
+
+        const update_step = b.step("update-langref", "Refetch and vendor the Zig Language Reference");
+        update_step.dependOn(&update_source.step);
+    }
+
+    const manifest_docs_module = b.createModule(.{
+        .root_source_file = b.path("lib/manifest/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    { // zig build update-manifest-docs
+        // Refetches the upstream `build.zig.zon` field documentation and vendors it into the
+        // source tree. Not part of the default build graph, same story as update-langref above.
+        const manifest_docs_url = b.fmt(
+            "https://codeberg.org/ziglang/zig/raw/tag/{s}/doc/build.zig.zon.md",
+            .{builtin.zig_version_string},
+        );
+        const fetch_manifest_docs = b.addRunArtifact(fetch_exe);
+        fetch_manifest_docs.setName("fetch build.zig.zon manifest docs");
+        fetch_manifest_docs.addArg(manifest_docs_url);
+        const manifest_docs_md = fetch_manifest_docs.addOutputFileArg("build.zig.zon.md");
+
+        const update_source = b.addUpdateSourceFiles();
+        update_source.addCopyFileToSource(manifest_docs_md, "lib/manifest/build.zig.zon.md");
+        update_source.addBytesToSource(
+            b.fmt("{s}\n", .{builtin.zig_version_string}),
+            "lib/manifest/ZIG_VERSION",
+        );
+
+        const update_step = b.step("update-manifest-docs", "Refetch and vendor the build.zig.zon manifest docs");
+        update_step.dependOn(&update_source.step);
+    }
 
     { // zig build gen
         const gen_step = b.step("gen", "Regenerate config files");
@@ -105,24 +164,26 @@ pub fn build(b: *std.Build) !void {
         }
     }
 
-    const lsp_types_output_file = blk: {
-        // The LSP metaModel.json (~16k lines) isn't vendored: it's fetched with Zig's own
-        // std.http.Client (see tools/fetch_file) and cached by the Zig build system, keyed on
-        // the command line (including this URL) - same caching story as the langref fetch above.
-        const fetch_exe = b.addExecutable(.{
-            .name = "zig_analyzer_fetch_file",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tools/fetch_file/main.zig"),
-                .target = b.graph.host,
-                .single_threaded = true,
-            }),
-        });
+    // The LSP metaModel.json (~16k lines) is vendored at tools/lsp_types_gen/metaModel.json (see
+    // `zig build update-lsp-metamodel` below to refetch it) - no network access at build time.
+    // It's pinned to a fixed spec version and only needs refreshing when that pin is deliberately
+    // bumped, unlike the Zig-version-tracked langref/manifest docs above.
+    const lsp_metamodel_url = "https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/metaModel/metaModel.json";
 
+    { // zig build update-lsp-metamodel
         const fetch_meta_model = b.addRunArtifact(fetch_exe);
         fetch_meta_model.setName("fetch LSP metaModel.json");
-        fetch_meta_model.addArg("https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/metaModel/metaModel.json");
+        fetch_meta_model.addArg(lsp_metamodel_url);
         const meta_model_json = fetch_meta_model.addOutputFileArg("metaModel.json");
 
+        const update_source = b.addUpdateSourceFiles();
+        update_source.addCopyFileToSource(meta_model_json, "tools/lsp_types_gen/metaModel.json");
+
+        const update_step = b.step("update-lsp-metamodel", "Refetch and vendor the pinned LSP metaModel.json");
+        update_step.dependOn(&update_source.step);
+    }
+
+    const lsp_types_output_file = blk: {
         const codegen_exe = b.addExecutable(.{
             .name = "lsp-codegen",
             .root_module = b.createModule(.{
@@ -131,7 +192,7 @@ pub fn build(b: *std.Build) !void {
                 .single_threaded = true,
             }),
         });
-        codegen_exe.root_module.addAnonymousImport("meta-model", .{ .root_source_file = meta_model_json });
+        codegen_exe.root_module.addAnonymousImport("meta-model", .{ .root_source_file = b.path("tools/lsp_types_gen/metaModel.json") });
 
         const run_codegen = b.addRunArtifact(codegen_exe);
         const output_file = run_codegen.addOutputFileArg("lsp_types.zig");
@@ -223,7 +284,8 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "lsp", .module = lsp_module },
             .{ .name = "json_rpc", .module = json_rpc_module },
             .{ .name = "build_options", .module = build_options },
-            .{ .name = "version_data", .module = version_data_module },
+            .{ .name = "builtin_docs", .module = builtin_docs_module },
+            .{ .name = "manifest_docs", .module = manifest_docs_module },
         },
     });
 
@@ -298,9 +360,21 @@ pub fn build(b: *std.Build) !void {
             .root_module = lsp_parser_module,
         });
 
+        const builtin_docs_tests = b.addTest(.{
+            .name = "test builtin_docs",
+            .root_module = builtin_docs_module,
+        });
+
+        const manifest_docs_tests = b.addTest(.{
+            .name = "test manifest_docs",
+            .root_module = manifest_docs_module,
+        });
+
         test_step.dependOn(&b.addRunArtifact(lsp_tests).step);
         test_step.dependOn(&b.addRunArtifact(json_rpc_tests).step);
         test_step.dependOn(&b.addRunArtifact(lsp_parser_tests).step);
+        test_step.dependOn(&b.addRunArtifact(builtin_docs_tests).step);
+        test_step.dependOn(&b.addRunArtifact(manifest_docs_tests).step);
     }
 }
 

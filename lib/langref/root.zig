@@ -1,9 +1,12 @@
 //! Builtin function metadata sourced from the Zig Language Reference.
 //!
-//! Build pipeline: Markitdown fetches the rendered docs page, then
-//! `tools/config_gen/builtin_serializer.zig` extracts/serializes builtins into
-//! `builtins.json`, which is embedded and parsed once lazily at runtime.
+//! `langref.md` is a vendored Markitdown conversion of
+//! <https://ziglang.org/documentation/0.16.0/> (run `zig build update-langref` to refresh it
+//! for a new Zig version). `tools/config_gen/builtin_serializer.zig` extracts/serializes
+//! builtins out of it into `builtins.json` at build time, which is embedded here and parsed
+//! once lazily at runtime.
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Builtin = struct {
     pub const Parameter = struct {
@@ -45,4 +48,15 @@ pub fn builtins() *const std.StringArrayHashMapUnmanaged(Builtin) {
 
 pub fn get(name: []const u8) ?Builtin {
     return ensureParsed().get(name);
+}
+
+test "vendored langref matches the compiling Zig version" {
+    const vendored_version = std.mem.trim(u8, @embedFile("ZIG_VERSION"), &std.ascii.whitespace);
+    if (!std.mem.eql(u8, vendored_version, builtin.zig_version_string)) {
+        std.debug.print(
+            "lib/langref/langref.md was vendored for Zig {s}, but this build is using Zig {s}. Run `zig build update-langref`.\n",
+            .{ vendored_version, builtin.zig_version_string },
+        );
+        return error.VendoredLangrefStale;
+    }
 }
